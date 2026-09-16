@@ -106,8 +106,8 @@ uv run python strategies/okx_grid_dry_run.py --out /tmp/grid-amend-dry-run.json
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
 
-1. `astral-sh/setup-uv` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈）。
-2. 三个脚本的 `--help` 能通过 `uv run python …` 启动（Python 3.12）。
+1. `astral-sh/setup-uv` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
+2. 三个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
 3. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不发 HTTP、不 amend、不提现。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。

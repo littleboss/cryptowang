@@ -32,28 +32,29 @@ jobs:
       - name: Sync project (paper runtime, no trading clients)
         run: uv sync --locked --no-dev
 
+      # --no-dev: do not install ruff (or any other extra) for paper smoke.
       - name: Help — scripts start
         run: |
-          uv run python tools/grid_fee_sensitivity.py --help
-          uv run python tools/sl_guard_observe.py --help
-          uv run python strategies/okx_grid_dry_run.py --help
+          uv run --locked --no-dev python tools/grid_fee_sensitivity.py --help
+          uv run --locked --no-dev python tools/sl_guard_observe.py --help
+          uv run --locked --no-dev python strategies/okx_grid_dry_run.py --help
 
       - name: Default run — paper / PRINT_ONLY
         run: |
           set -euo pipefail
-          uv run python tools/grid_fee_sensitivity.py | uv run python -c "
+          uv run --locked --no-dev python tools/grid_fee_sensitivity.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('mode') == 'paper', doc
           print('grid_fee_sensitivity: paper ok')
           "
-          uv run python tools/sl_guard_observe.py | uv run python -c "
+          uv run --locked --no-dev python tools/sl_guard_observe.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('mode') == 'paper_observe', doc
           print('sl_guard_observe: paper_observe ok')
           "
-          uv run python strategies/okx_grid_dry_run.py | uv run python -c "
+          uv run --locked --no-dev python strategies/okx_grid_dry_run.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('will_send_http') is False, doc
