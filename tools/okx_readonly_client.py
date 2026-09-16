@@ -40,8 +40,12 @@ ENV_SIMULATED = "OKX_SIMULATED"
 
 # Public market endpoints (no auth).
 PATH_TICKER = "/api/v5/market/ticker"
+PATH_TICKERS = "/api/v5/market/tickers"
 PATH_CANDLES = "/api/v5/market/candles"
 PATH_HISTORY_CANDLES = "/api/v5/market/history-candles"
+PATH_BOOKS = "/api/v5/market/books"
+PATH_FUNDING_RATE = "/api/v5/public/funding-rate"
+PATH_INSTRUMENTS = "/api/v5/public/instruments"
 
 # Private read-only endpoints (auth, GET only, OKX_SIMULATED=1 only).
 PATH_ACCOUNT_BALANCE = "/api/v5/account/balance"
@@ -51,7 +55,17 @@ PATH_GRID_HISTORY = "/api/v5/tradingBot/grid/orders-algo-history"
 PATH_GRID_DETAILS = "/api/v5/tradingBot/grid/orders-algo-details"
 PATH_GRID_POSITIONS = "/api/v5/tradingBot/grid/positions"
 
-PUBLIC_READ_PATHS = frozenset({PATH_TICKER, PATH_CANDLES, PATH_HISTORY_CANDLES})
+PUBLIC_READ_PATHS = frozenset(
+    {
+        PATH_TICKER,
+        PATH_TICKERS,
+        PATH_CANDLES,
+        PATH_HISTORY_CANDLES,
+        PATH_BOOKS,
+        PATH_FUNDING_RATE,
+        PATH_INSTRUMENTS,
+    }
+)
 PRIVATE_READ_PATHS = frozenset(
     {
         PATH_ACCOUNT_BALANCE,
@@ -257,6 +271,129 @@ class OkxPublicClient:
             if len(rows) < limit:
                 break
         return sorted(out.values(), key=lambda c: c.ts_ms)
+
+    # ---- order books / funding / instruments (public GET; used by the paper arb scanner)
+
+    def get_books(self, inst_id: str, sz: int = 5) -> dict:
+        """GET /market/books → {"bids": [(px, sz), ...], "asks": [...], "ts_ms": int}.
+
+        Sizes are returned exactly as OKX reports them: base units for SPOT, *contracts*
+        for SWAP / FUTURES / OPTION (multiply by the instrument's ctVal to get base units).
+        Best price first on both sides. No mark / mid is derived here.
+        """
+        if not (1 <= sz <= 400):
+            raise ValueError("books sz must be 1..400")
+        rows = self._get(PATH_BOOKS, {"instId": inst_id, "sz": str(sz)})
+        if not rows:
+            raise RuntimeError(f"no order book for {inst_id}")
+        book = rows[0]
+
+        def levels(side: list) -> list[tuple[float, float]]:
+            out: list[tuple[float, float]] = []
+            for lvl in side:
+                px, qty = float(lvl[0]), float(lvl[1])
+                if qty > 0:
+                    out.append((px, qty))
+            return out
+
+        return {
+            "instId": inst_id,
+            "bids": levels(book.get("bids") or []),
+            "asks": levels(book.get("asks") or []),
+            "ts_ms": int(book["ts"]) if book.get("ts") else 0,
+        }
+
+    def get_funding_rate(self, inst_id: str) -> dict:
+        """GET /public/funding-rate for a perpetual swap. Rates are decimals per interval."""
+
+        def f(v) -> float | None:
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        rows = self._get(PATH_FUNDING_RATE, {"instId": inst_id})
+        if not rows:
+            raise RuntimeError(f"no funding rate for {inst_id}")
+        r = rows[0]
+        funding_time = int(r["fundingTime"]) if r.get("fundingTime") else None
+        next_time = int(r["nextFundingTime"]) if r.get("nextFundingTime") else None
+        interval_sec = (
+            (next_time - funding_time) // 1000
+            if funding_time and next_time and next_time > funding_time
+            else 8 * 3600
+        )
+        return {
+            "instId": r.get("instId"),
+            "rate": f(r.get("fundingRate")),
+            "next_rate": f(r.get("nextFundingRate")),
+            "funding_time_ms": funding_time,
+            "next_funding_time_ms": next_time,
+            "interval_sec": interval_sec,
+            "method": r.get("method"),
+        }
+
+    def get_instruments(
+        self,
+        inst_type: str,
+        inst_family: str | None = None,
+        inst_id: str | None = None,
+    ) -> list[dict]:
+        """GET /public/instruments (SPOT / SWAP / OPTION metadata: ctVal, strike, expiry...)."""
+        q = {"instType": inst_type}
+        if inst_family:
+            q["instFamily"] = inst_family
+        if inst_id:
+            q["instId"] = inst_id
+        rows = self._get(PATH_INSTRUMENTS, q)
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "instId": r.get("instId"),
+                    "instType": r.get("instType"),
+                    "instFamily": r.get("instFamily"),
+                    "uly": r.get("uly"),
+                    "settleCcy": r.get("settleCcy"),
+                    "ctVal": float(r["ctVal"]) if r.get("ctVal") else None,
+                    "ctValCcy": r.get("ctValCcy"),
+                    "ctMult": float(r["ctMult"]) if r.get("ctMult") else None,
+                    "optType": r.get("optType") or None,
+                    "strike": float(r["stk"]) if r.get("stk") else None,
+                    "expTime_ms": int(r["expTime"]) if r.get("expTime") else None,
+                    "state": r.get("state"),
+                    "lotSz": float(r["lotSz"]) if r.get("lotSz") else None,
+                    "minSz": float(r["minSz"]) if r.get("minSz") else None,
+                }
+            )
+        return out
+
+    def get_tickers(self, inst_type: str, inst_family: str | None = None) -> list[dict]:
+        """GET /market/tickers — top-of-book snapshot for a whole instrument type / family."""
+        q = {"instType": inst_type}
+        if inst_family:
+            q["instFamily"] = inst_family
+        rows = self._get(PATH_TICKERS, q)
+
+        def f(v) -> float | None:
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        return [
+            {
+                "instId": t.get("instId"),
+                "bidPx": f(t.get("bidPx")),
+                "bidSz": f(t.get("bidSz")),
+                "askPx": f(t.get("askPx")),
+                "askSz": f(t.get("askSz")),
+                "last": f(t.get("last")),
+                "vol24h": f(t.get("vol24h")),
+                "ts_ms": int(t["ts"]) if t.get("ts") else 0,
+            }
+            for t in rows
+        ]
 
     def data_source_meta(self, inst_id: str, bar: str, limit: int, pages: int) -> dict:
         return {
