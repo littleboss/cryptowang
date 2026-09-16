@@ -44,6 +44,7 @@ jobs:
           uv run --locked --no-dev python tools/local_paper_grid.py --help
           uv run --locked --no-dev python strategies/grid_ab_compare.py --help
           uv run --locked --no-dev python tools/okx_readonly_client.py --help
+          uv run --locked --no-dev python strategies/paper_arb_scanner.py --help
 
       # Synthetic path only (no network). Day-1 must not be stuck at 0 fills.
       - name: Local paper grid — synthetic fills > 0, venue=local_paper
@@ -116,6 +117,47 @@ jobs:
           print('okx_readonly_client: private-status skipped without keys ok')
           "
           uv run --locked --no-dev python tools/okx_readonly_client.py policy
+
+      # Paper multi-leg arb scanner (Phase A) on the synthetic books fixture: offline, no keys.
+      # Every record must be observe_only / will_send_http=false with bid/ask-only legs.
+      # A synthetic "edge" in the fixture is a code-path check, not market evidence.
+      - name: Paper arb scanner — fixture replay, observe_only, bid/ask only
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python strategies/paper_arb_scanner.py --source fixture \
+            --paper-fills --out /tmp/arb.jsonl --summary-out /tmp/arb-summary.json --quiet
+          uv run --locked --no-dev python -c "
+          import json
+          rows = [json.loads(l) for l in open('/tmp/arb.jsonl') if l.strip()]
+          s = json.load(open('/tmp/arb-summary.json'))
+          assert rows, 'no records'
+          fams = set()
+          for r in rows:
+              assert r['action'] == 'observe_only', r['action']
+              assert r['will_send_http'] is False, r['will_send_http']
+              assert r['paper_fill']['order_sent'] is False
+              assert 'total' in r['costs_bps'] and isinstance(r['risk_flags'], list)
+              for leg in r['legs']:
+                  assert leg['price_type'] in ('bid', 'ask'), leg
+                  assert leg['price_type'] == ('ask' if leg['side'] == 'buy' else 'bid'), leg
+              if r['family'] == 'A1_funding_carry':
+                  assert r['taxonomy'] == 'relative_value', r['taxonomy']
+              else:
+                  assert r['taxonomy'].startswith('identity_approx'), r['taxonomy']
+              if r['family'] == 'A3_box' and r['direction'] == 'sell_box':
+                  assert r['passes_threshold'] is False, 'short box must never pass'
+              fams.add(r['family'])
+          assert fams == {'A1_funding_carry', 'A2_pcp_conversion', 'A2_pcp_reversal', 'A3_box'}, fams
+          assert s['action'] == 'observe_only' and s['will_send_http'] is False
+          assert all(v is False for v in s['trading_http'].values()), s['trading_http']
+          assert s['config']['safety_buffer']['calibrated'] is False
+          assert s['config']['leverage_concept'] == 1
+          assert set(s['hypotheses']) == {'H-A1', 'H-A2', 'H-A3'}, set(s['hypotheses'])
+          assert s['data_source']['http_fetch'] is False
+          print('paper_arb_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
+                {f: (v['records'], v['edge_exceeds_buffer'], v['passes_threshold'])
+                 for f, v in s['families'].items()})
+          "
 
       - name: Unit tests (stdlib unittest, no network)
         run: uv run --locked --no-dev python -m unittest discover -s tests -v
