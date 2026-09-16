@@ -1,0 +1,51 @@
+[project]
+name = "cryptowang"
+version = "0.1.0"
+description = "OKX paper / dry-run toolkit: grid fee sensitivity, SL-guard observe, and print-only amend. Packaging only — not live trading."
+readme = "README.md"
+requires-python = ">=3.11"
+# Runtime stays stdlib-only. Do not add trading / HTTP clients here.
+dependencies = []
+keywords = [
+    "okx",
+    "paper-trading",
+    "dry-run",
+    "grid",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Private :: Do Not Upload",
+]
+
+[project.urls]
+Repository = "https://github.com/littleboss/cryptowang"
+
+# Declared for uv / PEP 517. Project is not installed as a wheel:
+# scripts stay as-is under tools/ and strategies/.
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+]
+
+[tool.uv]
+# Keep tools/ and strategies/ as runnable files. Use:
+#   uv run python tools/grid_fee_sensitivity.py
+# Do not build or install this repo as a live-trading package.
+package = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
