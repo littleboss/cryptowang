@@ -1,7 +1,9 @@
 # Paper / dry-run smoke only.
 # Packaging (uv) ≠ live trading. Green CI ≠ live.
-# No secrets, no trading/HTTP client installs, no HTTP / amend / withdraw.
-# local_paper_grid runs on a synthetic path here (no network, no OKX public GET in CI).
+# No secrets, no trading/HTTP client installs, no order / amend / withdraw HTTP.
+# local_paper_grid and grid_ab_compare run on a synthetic path here (no network).
+# The only network step is a read-only GET of OKX *public* ticker/candles (no keys),
+# isolated in its own job and non-blocking.
 name: CI
 
 on:
@@ -40,6 +42,8 @@ jobs:
           uv run --locked --no-dev python tools/sl_guard_observe.py --help
           uv run --locked --no-dev python strategies/okx_grid_dry_run.py --help
           uv run --locked --no-dev python tools/local_paper_grid.py --help
+          uv run --locked --no-dev python strategies/grid_ab_compare.py --help
+          uv run --locked --no-dev python tools/okx_readonly_client.py --help
 
       # Synthetic path only (no network). Day-1 must not be stuck at 0 fills.
       - name: Local paper grid — synthetic fills > 0, venue=local_paper
@@ -60,6 +64,58 @@ jobs:
           print('local_paper_grid: buy=%d sell=%d arb=%d fee_after=%.4f ok'
                 % (m['buy_count'], m['sell_count'], m['arbitrage_num'], m['fee_after_pnl_est']))
           "
+
+      # Strategy module: baseline vs B1 on the same synthetic path, both engines.
+      # Nothing is adopted; will_send_http stays false; lever stays 1.
+      - name: Grid A/B compare — proposal v3, baseline vs B1, synthetic path
+        run: |
+          set -euo pipefail
+          for engine in import subprocess; do
+            uv run --locked --no-dev python strategies/grid_ab_compare.py --engine "$engine" \
+              --out "/tmp/cmp-$engine.json" --md-out "/tmp/cmp-$engine.md" --quiet
+          done
+          uv run --locked --no-dev python -c "
+          import json
+          a = json.load(open('/tmp/cmp-import.json'))
+          b = json.load(open('/tmp/cmp-subprocess.json'))
+          assert a['venue'] == 'local_paper' and a['will_send_http'] is False, a['venue']
+          assert a['trading_http']['amend'] is False and a['trading_http']['order'] is False
+          assert a['adoption']['adopted'] is False and a['adoption']['bot_changed'] is False
+          assert set(a['arms']) == {'baseline', 'B1'}, set(a['arms'])
+          for name, arm in a['arms'].items():
+              assert arm['params']['lever'] == 1, (name, arm['params'])
+              for k in ('fee_after_pnl_est', 'okx_bot_total_pnl_ratio', 'arbitrage_num',
+                        'max_drawdown_ratio', 'fee_falsified', 'invalidation'):
+                  assert k in arm, (name, k)
+              assert arm['arbitrage_num'] > 0, (name, arm['arbitrage_num'])
+              assert arm['candles'] == a['arms']['baseline']['candles'], 'arms must share the path'
+          for name in a['arms']:
+              for k in ('fee_after_pnl_est', 'arbitrage_num', 'max_drawdown_ratio'):
+                  assert a['arms'][name][k] == b['arms'][name][k], ('engine mismatch', name, k)
+          assert set(a['hypotheses']) == {'H-A', 'H-B', 'H-C'}, set(a['hypotheses'])
+          assert a['hypotheses']['H-C']['add_position_proposals_allowed'] is False
+          assert a['hypotheses']['H-C']['vetoed_arms'] == []
+          print('grid_ab_compare: baseline vs B1 ok;', {n: (x['fee_after_pnl_est'], x['arbitrage_num'])
+                                                       for n, x in a['arms'].items()})
+          "
+          cat /tmp/cmp-import.md
+
+      # Private read-only path must stub cleanly with no keys (no Actions secrets exist here).
+      - name: Read-only client — private-status stubs without keys (offline)
+        run: |
+          set -euo pipefail
+          env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED \
+            uv run --locked --no-dev python tools/okx_readonly_client.py private-status \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc['skipped'] is True, doc
+          assert doc['policy']['will_send_http'] is False, doc['policy']
+          assert doc['policy']['order'] is False and doc['policy']['amend'] is False
+          assert doc['policy']['withdraw'] is False and doc['policy']['transfer'] is False
+          print('okx_readonly_client: private-status skipped without keys ok')
+          "
+          uv run --locked --no-dev python tools/okx_readonly_client.py policy
 
       - name: Unit tests (stdlib unittest, no network)
         run: uv run --locked --no-dev python -m unittest discover -s tests -v
@@ -86,3 +142,57 @@ jobs:
           assert doc.get('method') == 'PRINT_ONLY', doc
           print('okx_grid_dry_run: will_send_http=false PRINT_ONLY ok')
           "
+
+  # Read-only *public* market GET (ticker + candles). No keys, no secrets, no trade endpoints.
+  # Separate job so a network hiccup / regional block cannot fail the offline paper gate.
+  # This is informational: a red here means "OKX public API unreachable from the runner",
+  # never "trading happened".
+  public-read-smoke:
+    name: OKX public read-only GET smoke (no keys, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync project (paper runtime, no trading clients)
+        run: uv sync --locked --no-dev
+
+      - name: Public ticker + candles (GET only)
+        env:
+          # Belt and braces: make sure nothing private can activate even by accident.
+          OKX_API_KEY: ""
+          OKX_API_SECRET: ""
+          OKX_API_PASSPHRASE: ""
+          OKX_SIMULATED: ""
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python tools/okx_readonly_client.py ticker --inst-id ETH-USDT \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc['policy']['will_send_http'] is False, doc['policy']
+          assert doc['ticker']['instId'] == 'ETH-USDT' and doc['ticker']['last'] > 0, doc['ticker']
+          print('public ticker ok: last=%s' % doc['ticker']['last'])
+          "
+          uv run --locked --no-dev python tools/okx_readonly_client.py candles --inst-id ETH-USDT \
+              --bar 5m --limit 12 --pages 1 --csv-out /tmp/eth-5m.csv \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc['data_source']['auth'] == 'none' and doc['data_source']['read_only'] is True
+          assert doc['count'] > 0, doc['count']
+          ts = [c['ts_ms'] for c in doc['candles']]
+          assert ts == sorted(ts), 'candles must be oldest→newest'
+          print('public candles ok: %d rows' % doc['count'])
+          "
+          # Same public candles through the strategy module via CSV replay (offline after fetch).
+          uv run --locked --no-dev python strategies/grid_ab_compare.py --source csv \
+            --candles-csv /tmp/eth-5m.csv --quiet --print-md

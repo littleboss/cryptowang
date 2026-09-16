@@ -11,9 +11,10 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 | 路径 | 内容 |
 |------|------|
 | `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（仅打包，无交易依赖） |
-| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配 |
-| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**（无密钥、无下单） |
-| `tests/` | 标准库 `unittest` 冒烟 / 单测（合成路径必须出成交） |
+| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块** |
+| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（公共行情 GET；可选 `OKX_SIMULATED=1` 只读状态） |
+| `fixtures/proposals/` | 提案 JSON（v3：基线 vs B1），供策略模块 / CI 离线消费；无密钥 |
+| `tests/` | 标准库 `unittest` 冒烟 / 单测（合成路径必须出成交；只读客户端用本地假服务器，不出网） |
 | `notes/` | 筛选结论、Freqtrade 对照、v2 旁路笔记 |
 | `backtests/` | 预留：回测脚本与费用后报告（本 PR 未加） |
 
@@ -22,7 +23,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 1. **无密钥**：不提交 API key、`.env`、提现权限。`.gitignore` 已挡常见密钥文件。
 2. **无提现 / 无跨所转账自动化**。
 3. **默认现货 / ≤1x**；`>2x` 标红另批。本仓 dry-run 与 local_paper 固定 `lever=1`。
-4. **默认 dry-run**：`will_send_http=false`。未获用户明确确认 + 风控放行前，不得实写 / live amend。唯一允许的网络调用是 `local_paper_grid.py --source okx-public` 对 **公共行情** K 线的只读 GET（无签名、无私有 Trade API）。
+4. **默认 dry-run**：`will_send_http=false`。未获用户明确确认 + 风控放行前，不得实写 / live amend。允许的网络调用只有两类，且都是 **GET**：(a) 公共行情 K 线 / ticker 的只读 GET（`local_paper_grid.py --source okx-public`、`okx_readonly_client.py ticker|candles`，无签名、无密钥）；(b) `okx_readonly_client.py private-status` 在 **`OKX_SIMULATED=1` + 三个 env 变量齐全** 时对 OKX 模拟盘 账户 / Bot 状态的签名 GET。Trade / amend / transfer / withdraw 端点在代码层被拒绝，不实现。
 5. **演示 fixture 的 `algoId`（默认 `demo-grid-eth-usdt-001`）不得用于 live amend。**
 6. 纸面结果 **≠ OKX Bot 净值 / 收益承诺**。回撤口径必须用 Bot `total_pnl_ratio`，不是 Freqtrade hyperopt 曲线。
 7. 先可证伪假设 → 再写代码 → 费用后回测 / 纸面。优化产出：diff + 前后对比 + 失效条件。
@@ -31,6 +32,8 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 
 - 演示提案 v1（`slTriggerPx=2150`）已附条件放行，等用户确认后才允许 dry-run 之外的动作。
 - 模拟 venue 当前为 **`local_paper`**（OKX demo key 尚未到位，不接 `okx_demo`）。Day-0 metrics 为 bootstrap（0 新成交）；Day-1 起用 `tools/local_paper_grid.py` 产出。
+- 提案 v3（[fixtures/proposals](fixtures/proposals/)）：**立刻不改参**（保持 2200–3200 / 30 / SL 2150 / 1x）；纸面实验臂 **B1**（maxPx 2700、gridNum 20）风控**附条件允许**，只在 `local_paper` 对照跑，用 `strategies/grid_ab_compare.py`；采纳须另行确认。加仓 / 加杠杆已否决（H-C）。
+- 只读 OKX 客户端已入库（公共行情 GET；可选 `OKX_SIMULATED=1` 只读状态）。**没有** Trade / amend / withdraw 代码。
 - 本仓只入库纸面工具；**push ≠ 实盘**。
 
 ## 包装说明（仅工程，不是实盘）
@@ -182,25 +185,109 @@ uv run python tools/local_paper_grid.py --source okx-public --bar 1m --pages 5 \
 
 模型简化（见输出里的 `sim_assumptions`）：格线精确成交、无滑点 / 最小下单量 / 部分成交、买入手续费从 quote 扣（OKX 实际扣 base）、起始价不在区间内则等待进入区间再启动。**这些简化都意味着结果不能当 OKX Bot 净值。**
 
-### 5. 单测 / 冒烟
+### 5. 策略模块：基线 vs 实验臂 A/B 对照 + 假设评分（`strategies/grid_ab_compare.py`）
+
+**纸面对照 ≠ OKX Bot 净值 ≠ 收益承诺；任何臂都不会因本模块输出而「采纳」**——输出里 `adoption.adopted=false`、`bot_changed=false` 固定为假，采纳须风控审后用户确认。
+
+模块吃 [提案 v3 JSON](fixtures/proposals/2026-09-16-local-paper-eth-grid-001-v3.json)（`baseline` + 任意 `paper_experiment_*` 臂，当前是 **B1：maxPx 3200→2700、gridNum 30→20，min / SL / 投入 / 1x 不变**），把**同一条 K 线路径、同一费率**喂给 `tools/local_paper_grid.py` 跑每个臂，然后：
+
+- 输出对照 JSON（`--out`）与 markdown 表（`--md-out` / `--print-md`）：`fee_after_pnl_est`、`okx_bot_total_pnl_ratio`、`arbitrage_num`、`max_drawdown_ratio`、`fees_paid_est`、`fee_falsified`、`per_grid_pct`、买/卖比、`untouched_grid_fraction`（从未成交格子占比，对应「上沿闲置」）、失效矩阵（提案 `invalidation` 里的 5 个名字逐项 true/false + `any`）。
+- 给可证伪假设打分（状态值只有 `supported_on_window` / `not_yet_falsified` / `falsified*` / `policy_enforced` 等，**不会输出「有效」「盈利」这类结论**）：
+
+| ID | 评分口径（与提案 §2 对齐） |
+|----|------|
+| H-A | 基线臂 `fee_after_pnl_est > 0` → `supported_on_window`；否则看 `--history-dir` 里 `YYYY-MM-DD-<runId>.json` EOD 序列 + 本次：**连续 7 个 EOD** `fee_after ≤ Day-1（-28.32）` 且 `套利/日 < 1` → `falsified`，不足 7 天 → `not_yet_falsified`（给出 `consecutive_bad_eods` / `days_until_falsifiable`） |
+| H-B | 同窗同费下，B1 `Δfee_after ≤ 0` **或** `ΔMDD > 0.02` → `falsified_on_window`（`falsified_by` 列原因）；否则 `supported_on_window`。附 `arb_per_1000_quote`、`untouched_grid_fraction`、`above_max_px_candles` |
+| H-C | 加载提案时任何臂 **投入或杠杆高于基线直接拒绝**（`ValueError (H-C)`）；输出每臂 `adds_capital/adds_lever` 与 Day-1 库存风险标志（买/卖比 > 3 且浮亏 → `inventory_risk=true`，即失效项 `buy_sell_ratio_gt_3_with_worsening_float`）；`add_position_proposals_allowed` 固定 false；「强制加仓」压力臂**按设计不构造** |
+
+引擎模式：`--engine import`（默认，进程内调用 `LocalPaperGrid`）或 `--engine subprocess`（把 K 线落成 CSV 后调用 `tools/local_paper_grid.py --source csv` CLI）。两者 metrics 完全一致（单测 + CI 断言）。
+
+```bash
+uv run python strategies/grid_ab_compare.py --help
+
+# 离线：合成振荡路径（中枢 2450、±200，同时落在两臂区间内），打印 markdown 表 + 写 JSON
+uv run python strategies/grid_ab_compare.py --print-md --quiet --out /tmp/cmp.json
+
+# 用 CLI 子进程引擎，且把每个臂的完整 schema JSON 落盘（<dir>/YYYY-MM-DD-<runId>-<arm>.json）
+uv run python strategies/grid_ab_compare.py --engine subprocess --arm-reports-dir /tmp/arms --quiet
+
+# 只跑 B1（基线总会一并跑，作为对照）
+uv run python strategies/grid_ab_compare.py --arms B1 --print-md --quiet
+
+# 回放已落盘的 K 线 CSV（与 local_paper_grid --save-candles-csv 同格式）
+uv run python strategies/grid_ab_compare.py --source csv --candles-csv /tmp/eth-usdt-5m.csv \
+  --md-out /tmp/cmp.md --out /tmp/cmp.json --quiet
+
+# OKX 公共 5m K 线（只读 GET，经 tools/okx_readonly_client.py，无密钥），近 ~25h
+uv run python strategies/grid_ab_compare.py --source okx-public --bar 5m --limit 300 --pages 1 \
+  --save-candles-csv /tmp/eth-5m.csv --print-md --quiet --out /tmp/cmp-public.json
+
+# H-A 的 7 日滚动规则：把 02-metrics/sim/ 的 EOD 文件目录喂进去
+uv run python strategies/grid_ab_compare.py --source csv --candles-csv /tmp/today.csv \
+  --history-dir /workspace/okx-team/02-metrics/sim --print-md --quiet
+```
+
+安全阀：提案 `will_send_http` 不为 `false` → 拒绝加载；任何臂 `lever≠1`、`slTriggerPx ≥ minPx` → 拒绝；实验臂投入 / 杠杆高于基线 → 拒绝（H-C）。模块本身不发任何交易 HTTP；`--source okx-public` 只走公共行情 GET。
+
+### 6. 只读 OKX 客户端（`tools/okx_readonly_client.py`）
+
+**只有 GET。** 不实现、也不会实现：下单、amend / stop 网格、划转、提现。代码层三道闸：`assert_read_only()` 在任何 socket 打开前拒绝非 GET 方法、拒绝不在只读白名单里的路径、拒绝含 `/trade/`、`amend`、`order-algo`、`withdraw`、`transfer`、`/asset/` 等片段的路径；`place_order/amend_algo/transfer/withdraw` 方法存在但只会抛 `ReadOnlyViolation`。
+
+**公共行情（无密钥）**
+
+```bash
+uv run python tools/okx_readonly_client.py --help
+uv run python tools/okx_readonly_client.py ticker --inst-id ETH-USDT
+uv run python tools/okx_readonly_client.py candles --inst-id ETH-USDT --bar 5m --limit 288 --pages 1 \
+  --csv-out /tmp/eth-usdt-5m.csv      # 可直接喂 local_paper_grid / grid_ab_compare --source csv
+uv run python tools/okx_readonly_client.py policy   # 离线打印只读策略 + env 变量是否设置（只显示长度，不显示值）
+```
+
+**可选：OKX 模拟盘只读状态（签名 GET）**
+
+仅当以下四个环境变量**全部**满足时才会激活，否则 `private-status` 打印 `{"skipped": true, ...}` 并以 0 退出（CI 就是这个分支）：
+
+```bash
+export OKX_API_KEY=...          # 模拟盘 key（在 OKX「模拟交易」里创建，只勾读取权限，不要提现权限）
+export OKX_API_SECRET=...
+export OKX_API_PASSPHRASE=...
+export OKX_SIMULATED=1          # 缺这个 → 直接拒绝（退出码 3），不会用 live key 发任何请求
+
+uv run python tools/okx_readonly_client.py private-status --ccy USDT
+uv run python tools/okx_readonly_client.py private-status --algo-id <demoAlgoId>   # 附 Bot 详情摘要
+```
+
+请求头带 `x-simulated-trading: 1`；只调 `GET /account/balance|config`、`GET /tradingBot/grid/orders-algo-pending|history|details|positions`。`bot_status_summary()` 把 Bot 详情映射到 sim-daily-schema 字段（`okx_bot_total_pnl_ratio`、`grid_profit`、`float_profit`、`arbitrage_num`，`venue=okx_demo`），方便日后把 `okx_demo` 与 `local_paper` 同构对照。
+
+密钥纪律：只从环境变量读；`repr` / 日志只显示 `<set:N chars>`；不写文件；`.gitignore` 已挡 `.env*`。**不要把密钥放进 GitHub Actions Secrets**——CI 不需要。
+
+### 7. 单测 / 冒烟
 
 ```bash
 uv run --no-dev python -m unittest discover -s tests -v
 ```
 
-覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘。全部离线。
+覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘；策略模块的提案加载 / 三道拒绝（`will_send_http=true`、`lever=2`、加仓臂）、两臂同路径出成交、必填输出字段、deltas 一致性、H-A 7 日连败 / 重置、H-B 2pct MDD 边界、Day-1 库存风险规则、import 与 subprocess 引擎一致、CLI 落 JSON + markdown；只读客户端的 GET-only 闸门、trade/amend/withdraw 路径拒绝、live key 拒绝、`repr` 不泄露、HMAC 签名向量、假服务器上的 ticker / 分页 candles / 签名 GET 头、无密钥 stub。全部离线（客户端测试用本机 `http.server` 假 OKX）。
 
 ## CI
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
 
-1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
-2. 四个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
-3. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
-4. `python -m unittest discover -s tests`（标准库，无网络）。
-5. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+**job `paper-smoke`（离线，阻塞）**
 
-**CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不发 HTTP（CI 里不调 OKX 公共行情，只用合成路径）、不 amend、不提现。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。
+1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
+2. 六个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+3. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
+4. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
+5. `okx_readonly_client.py private-status` 在清空 `OKX_*` 环境后必须打印 `skipped=true`（无密钥 stub），`policy` 里 `will_send_http/order/amend/withdraw/transfer` 全为 false。
+6. `python -m unittest discover -s tests`（标准库，无网络）。
+7. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+
+**job `public-read-smoke`（出网，`continue-on-error: true`，不阻塞）**
+
+对 OKX **公共** `ticker` / `candles` 做只读 GET（无密钥；`OKX_*` 显式置空），断言 `auth=none`、`read_only=true`、K 线按时间升序；再把这 12 根公开 K 线经 CSV 回放喂给 `grid_ab_compare.py`。这一步红只代表「runner 到 OKX 公共 API 不通」，不代表任何交易发生。
+
+**CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不 amend、不提现、不下单；唯一出网的是上面那个只读公共行情 GET。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。
 
 ## 笔记
 
