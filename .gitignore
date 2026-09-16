@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*secret*
+*apikey*
+*api_key*
+
+# Local dry-run dumps
+*.local.json
