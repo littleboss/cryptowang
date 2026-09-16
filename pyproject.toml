@@ -4,8 +4,13 @@ version = "0.1.0"
 description = "OKX paper / dry-run toolkit: grid fee sensitivity, SL-guard observe, print-only amend, and a local_paper spot-grid fill simulator. Packaging only — not live trading."
 readme = "README.md"
 requires-python = ">=3.11"
-# Runtime stays stdlib-only. Do not add trading / HTTP clients here.
-dependencies = []
+# Runtime: stdlib + the official OKX SDK, pinned. The SDK is only reachable through the
+# GET-only facade in tools/okx_sdk_readonly.py (Market / Account / Grid read endpoints;
+# okx.Trade / Funding / SubAccount are never imported). Do not add any other trading
+# client, and do not widen the facade to POST.
+dependencies = [
+    "python-okx==0.4.4",
+]
 keywords = [
     "okx",
     "paper-trading",
