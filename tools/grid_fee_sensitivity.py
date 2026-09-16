@@ -103,7 +103,7 @@ def main() -> None:
         "--intervals",
         choices=["grid_num", "grid_num_minus_1"],
         default="grid_num",
-        help="grid_num_minus_1 ≈ demo metrics ~1.28% mid-span",
+        help="grid_num_minus_1 ≈ demo metrics ~1.28%% mid-span",
     )
     p.add_argument(
         "--fees",
