@@ -121,8 +121,9 @@ CROSS_CHECKED_INBOX = [
 
 DISCLAIMER = (
     "纸面只读扫描（observe_only，will_send_http=false）。净边 = bid/ask 可执行毛边 − 全成本，"
-    "门限 safety_buffer 为分量之和且默认未标定；relative_value 记录不是无风险套利；"
-    "identity_approx 记录仍有执行 / 结算 / 保证金风险。不是收益承诺，不下单。"
+    "门限 safety_buffer 为分量之和且默认未标定；relative_value 记录属 carry / 相对价值，"
+    "承担 funding 路径与基差风险；identity_approx 记录仍有执行 / 结算 / 保证金风险。"
+    "不是收益承诺，不下单。"
 )
 
 # Flags that invalidate a record for threshold purposes (still logged, never passes).
