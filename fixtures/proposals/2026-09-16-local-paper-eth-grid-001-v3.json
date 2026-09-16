@@ -1,0 +1,46 @@
+{
+  "version": "v3",
+  "runId": "local-paper-eth-grid-001",
+  "algoId": null,
+  "venue": "local_paper",
+  "created_at": "2026-09-16 12:59:00 CST",
+  "source_metrics": "02-metrics/sim/2026-09-16-local-paper-eth-grid-001.json",
+  "status": "pending_risk",
+  "mode": "纸面假设",
+  "will_send_http": false,
+  "baseline": {
+    "minPx": 2200,
+    "maxPx": 3200,
+    "gridNum": 30,
+    "investment": 1000,
+    "lever": 1,
+    "slTriggerPx": 2150,
+    "day1_okx_bot_total_pnl_ratio": -0.02738697,
+    "day1_fee_after_pnl_est": -28.321237,
+    "day1_arbitrage_num": 2,
+    "day1_max_drawdown_ratio": 0.04180774
+  },
+  "proposed_hold": {
+    "action": "no_change_until_more_days",
+    "investment": 1000,
+    "lever": 1,
+    "slTriggerPx": 2150
+  },
+  "paper_experiment_B1": {
+    "minPx": 2200,
+    "maxPx": 2700,
+    "gridNum": 20,
+    "investment": 1000,
+    "lever": 1,
+    "slTriggerPx": 2150,
+    "requires": ["risk_review", "user_confirm_before_adopt"]
+  },
+  "hypotheses": ["H-A", "H-B", "H-C"],
+  "invalidation": [
+    "price_below_2200",
+    "sl_hit_2150",
+    "okx_bot_total_pnl_ratio_lte_-0.08",
+    "fee_gte_per_grid",
+    "buy_sell_ratio_gt_3_with_worsening_float"
+  ]
+}
