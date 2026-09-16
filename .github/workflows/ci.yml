@@ -1,0 +1,56 @@
+# Paper / dry-run smoke only.
+# Green CI ≠ live trading. No secrets, no pip deps, no HTTP / amend / withdraw.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+# Least privilege: checkout the repo. Do not add Actions secrets.
+permissions:
+  contents: read
+
+jobs:
+  paper-smoke:
+    name: Paper / dry-run smoke (no HTTP)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Stdlib only — do not pip install, do not load .env.
+      - name: Help — scripts start
+        run: |
+          python3 tools/grid_fee_sensitivity.py --help
+          python3 tools/sl_guard_observe.py --help
+          python3 strategies/okx_grid_dry_run.py --help
+
+      - name: Default run — paper / PRINT_ONLY
+        run: |
+          set -euo pipefail
+          python3 tools/grid_fee_sensitivity.py | python3 -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc.get('mode') == 'paper', doc
+          print('grid_fee_sensitivity: paper ok')
+          "
+          python3 tools/sl_guard_observe.py | python3 -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc.get('mode') == 'paper_observe', doc
+          print('sl_guard_observe: paper_observe ok')
+          "
+          python3 strategies/okx_grid_dry_run.py | python3 -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc.get('will_send_http') is False, doc
+          assert doc.get('method') == 'PRINT_ONLY', doc
+          print('okx_grid_dry_run: will_send_http=false PRINT_ONLY ok')
+          "

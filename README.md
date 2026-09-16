@@ -80,6 +80,15 @@ python3 strategies/okx_grid_dry_run.py --out /tmp/grid-amend-dry-run.json
 
 默认只改绝对价 `slTriggerPx=2150`（不是 Freqtrade 相对比率）。不加仓、不加杠杆。
 
+## CI
+
+GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
+
+1. 三个脚本的 `--help` 能启动（Python 3.12、标准库，不 `pip install`）。
+2. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+
+**CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不发 HTTP、不 amend、不提现。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。
+
 ## 笔记
 
 - [`notes/2026-09-16-code-screen-from-reading-pack.md`](notes/2026-09-16-code-screen-from-reading-pack.md) — 哪些可进代码、哪些明确不做
