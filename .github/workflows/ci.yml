@@ -1,6 +1,7 @@
 # Paper / dry-run smoke only.
 # Packaging (uv) ≠ live trading. Green CI ≠ live.
 # No secrets, no trading/HTTP client installs, no HTTP / amend / withdraw.
+# local_paper_grid runs on a synthetic path here (no network, no OKX public GET in CI).
 name: CI
 
 on:
@@ -38,6 +39,30 @@ jobs:
           uv run --locked --no-dev python tools/grid_fee_sensitivity.py --help
           uv run --locked --no-dev python tools/sl_guard_observe.py --help
           uv run --locked --no-dev python strategies/okx_grid_dry_run.py --help
+          uv run --locked --no-dev python tools/local_paper_grid.py --help
+
+      # Synthetic path only (no network). Day-1 must not be stuck at 0 fills.
+      - name: Local paper grid — synthetic fills > 0, venue=local_paper
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python tools/local_paper_grid.py --source synthetic \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          m = doc['metrics']
+          assert doc.get('venue') == 'local_paper', doc.get('venue')
+          assert doc.get('will_send_http') is False, doc.get('will_send_http')
+          assert doc['trading_http']['amend'] is False, doc['trading_http']
+          assert doc['data_source']['http_fetch'] is False, doc['data_source']
+          assert doc['params']['lever'] == 1, doc['params']
+          assert m['buy_count'] > 0 and m['sell_count'] > 0 and m['arbitrage_num'] > 0, m
+          assert abs((m['okx_bot_total_pnl'] - m['fees_paid_est']) - m['fee_after_pnl_est']) < 1e-4, m
+          print('local_paper_grid: buy=%d sell=%d arb=%d fee_after=%.4f ok'
+                % (m['buy_count'], m['sell_count'], m['arbitrage_num'], m['fee_after_pnl_est']))
+          "
+
+      - name: Unit tests (stdlib unittest, no network)
+        run: uv run --locked --no-dev python -m unittest discover -s tests -v
 
       - name: Default run — paper / PRINT_ONLY
         run: |
