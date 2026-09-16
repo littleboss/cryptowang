@@ -1,7 +1,7 @@
 [project]
 name = "cryptowang"
 version = "0.1.0"
-description = "OKX paper / dry-run toolkit: grid fee sensitivity, SL-guard observe, and print-only amend. Packaging only — not live trading."
+description = "OKX paper / dry-run toolkit: grid fee sensitivity, SL-guard observe, print-only amend, and a local_paper spot-grid fill simulator. Packaging only — not live trading."
 readme = "README.md"
 requires-python = ">=3.11"
 # Runtime stays stdlib-only. Do not add trading / HTTP clients here.
