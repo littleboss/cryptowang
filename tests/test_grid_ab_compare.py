@@ -64,6 +64,7 @@ class ProposalTest(unittest.TestCase):
 
     def test_refuses_will_send_http_true(self):
         with tempfile.TemporaryDirectory() as d:
+            # negative test: a proposal flagged for trading HTTP must be REFUSED at load time
             path = write_proposal(d, will_send_http=True)
             with self.assertRaises(ValueError):
                 gab.load_proposal(path)
