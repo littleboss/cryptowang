@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.ruff_cache/
+.pytest_cache/
 
 # Secrets — never commit
 .env

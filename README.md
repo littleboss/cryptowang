@@ -10,6 +10,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 
 | 路径 | 内容 |
 |------|------|
+| `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（仅打包，无交易依赖） |
 | `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配 |
 | `tools/` | 纸面校验、观察器（无密钥、无下单） |
 | `notes/` | 筛选结论、Freqtrade 对照、v2 旁路笔记 |
@@ -30,25 +31,46 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 - 演示提案 v1（`slTriggerPx=2150`）已附条件放行，等用户确认后才允许 dry-run 之外的动作。
 - 本 PR 只入库纸面工具；**push ≠ 实盘**。
 
+## 包装说明（仅工程，不是实盘）
+
+本仓用 [`uv`](https://docs.astral.sh/uv/) + `pyproject.toml` 管理 Python 环境。**这只是打包 / 依赖锁定，不是开通实盘。**
+
+- 运行时依赖为空：脚本仍是标准库，**没有**交易 / HTTP 下单客户端。
+- `uv sync` / `uv run` **≠** 下单、**≠** 注入密钥、**≠** 启用 freqtrade live。
+- 脚本保持在 `tools/` 与 `strategies/`，用 `uv run python …` 直接跑；没有把本仓装成可发单包。
+
 ## 如何运行
 
-Python 3 标准库即可，无需 `pip install`。
+先装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再同步环境（会按 `uv.lock` 建 `.venv`；运行时无需第三方包）：
+
+```bash
+uv sync
+```
+
+开发工具（可选，`dependency-groups.dev`，目前只有 ruff）：
+
+```bash
+uv sync --group dev
+# 或默认也会装上 dev 组：uv sync
+```
+
+仍可用系统 `python3` 直接跑（标准库即可）。推荐用 `uv run`，与 CI 一致。
 
 ### 1. 网格费用敏感度（纸面）
 
 证伪「保留 N 格」：若往返手续费 `>=` 单格振幅，则该格数站不住。
 
 ```bash
-python3 tools/grid_fee_sensitivity.py --help
+uv run python tools/grid_fee_sensitivity.py --help
 
 # 默认：ETH 演示区间 2200–3200、30 格、maker+taker
-python3 tools/grid_fee_sensitivity.py
+uv run python tools/grid_fee_sensitivity.py
 
 # Freqtrade 风格 worst-case：2 * max(maker, taker)
-python3 tools/grid_fee_sensitivity.py --worst-case
+uv run python tools/grid_fee_sensitivity.py --worst-case
 
 # 与 fixture ~1.28% mid-span 对齐的格数口径
-python3 tools/grid_fee_sensitivity.py --intervals grid_num_minus_1
+uv run python tools/grid_fee_sensitivity.py --intervals grid_num_minus_1
 ```
 
 输出含 `disclaimer`：纸面敏感度 ≠ OKX Bot 净值。
@@ -58,9 +80,9 @@ python3 tools/grid_fee_sensitivity.py --intervals grid_num_minus_1
 借鉴 Freqtrade `StoplossGuard` 的 lookback + trade_limit，**不 PairLock、不自动重启、不 amend**。
 
 ```bash
-python3 tools/sl_guard_observe.py --help
+uv run python tools/sl_guard_observe.py --help
 
-python3 tools/sl_guard_observe.py \
+uv run python tools/sl_guard_observe.py \
   --trade-limit 3 \
   --lookback-minutes 10080 \
   --hits '2026-09-16T10:00:00+08:00|sl,2026-09-16T12:00:00+08:00|sl'
@@ -71,11 +93,11 @@ python3 tools/sl_guard_observe.py \
 打印拟调用的 `amend-order-algo` 字段。`method=PRINT_ONLY`，`will_send_http=false`。默认 `algoId=demo-grid-eth-usdt-001`，**禁止拿去 live amend**。
 
 ```bash
-python3 strategies/okx_grid_dry_run.py --help
+uv run python strategies/okx_grid_dry_run.py --help
 
-python3 strategies/okx_grid_dry_run.py
+uv run python strategies/okx_grid_dry_run.py
 # 可选：把 JSON 落到文件（仍不发 HTTP）
-python3 strategies/okx_grid_dry_run.py --out /tmp/grid-amend-dry-run.json
+uv run python strategies/okx_grid_dry_run.py --out /tmp/grid-amend-dry-run.json
 ```
 
 默认只改绝对价 `slTriggerPx=2150`（不是 Freqtrade 相对比率）。不加仓、不加杠杆。
@@ -84,8 +106,9 @@ python3 strategies/okx_grid_dry_run.py --out /tmp/grid-amend-dry-run.json
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
 
-1. 三个脚本的 `--help` 能启动（Python 3.12、标准库，不 `pip install`）。
-2. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
+2. 三个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+3. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不发 HTTP、不 amend、不提现。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。
 

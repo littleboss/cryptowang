@@ -1,5 +1,6 @@
 # Paper / dry-run smoke only.
-# Green CI ≠ live trading. No secrets, no pip deps, no HTTP / amend / withdraw.
+# Packaging (uv) ≠ live trading. Green CI ≠ live.
+# No secrets, no trading/HTTP client installs, no HTTP / amend / withdraw.
 name: CI
 
 on:
@@ -20,34 +21,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
+          enable-cache: true
 
-      # Stdlib only — do not pip install, do not load .env.
+      # Lockfile-only sync. Runtime deps are empty (stdlib).
+      # --no-dev skips ruff. Do not pip install trading stacks.
+      - name: Sync project (paper runtime, no trading clients)
+        run: uv sync --locked --no-dev
+
+      # --no-dev: do not install ruff (or any other extra) for paper smoke.
       - name: Help — scripts start
         run: |
-          python3 tools/grid_fee_sensitivity.py --help
-          python3 tools/sl_guard_observe.py --help
-          python3 strategies/okx_grid_dry_run.py --help
+          uv run --locked --no-dev python tools/grid_fee_sensitivity.py --help
+          uv run --locked --no-dev python tools/sl_guard_observe.py --help
+          uv run --locked --no-dev python strategies/okx_grid_dry_run.py --help
 
       - name: Default run — paper / PRINT_ONLY
         run: |
           set -euo pipefail
-          python3 tools/grid_fee_sensitivity.py | python3 -c "
+          uv run --locked --no-dev python tools/grid_fee_sensitivity.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('mode') == 'paper', doc
           print('grid_fee_sensitivity: paper ok')
           "
-          python3 tools/sl_guard_observe.py | python3 -c "
+          uv run --locked --no-dev python tools/sl_guard_observe.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('mode') == 'paper_observe', doc
           print('sl_guard_observe: paper_observe ok')
           "
-          python3 strategies/okx_grid_dry_run.py | python3 -c "
+          uv run --locked --no-dev python strategies/okx_grid_dry_run.py | uv run --locked --no-dev python -c "
           import json, sys
           doc = json.load(sys.stdin)
           assert doc.get('will_send_http') is False, doc
