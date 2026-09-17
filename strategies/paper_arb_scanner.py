@@ -185,8 +185,9 @@ class Walk:
 class Book:
     """One instrument's order book. Best price first on both sides. Sizes in base units.
 
-    kind: spot | perp | option. `mark_px` is carried for *reference only*; it is never
-    used as an executable price anywhere in this module.
+    kind: spot | perp | option (| future — dated futures, used only by the expansion
+    scanner). `mark_px` is carried for *reference only*; it is never used as an executable
+    price anywhere in this module.
     """
 
     inst_id: str
@@ -263,6 +264,8 @@ class Funding:
     next_rate: float | None = None
     interval_sec: int = 8 * 3600
     next_funding_time_ms: int | None = None
+    # Past settled per-interval rates, oldest first (optional; expansion C2 stub input only).
+    history: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,9 @@ class Snapshot:
     options: tuple[Book, ...] = ()
     spot_borrow_apr: float | None = None  # None → borrow unavailable (shorts skipped)
     source: dict = field(default_factory=dict)
+    # Dated (expiring) futures books, kind == "future" (optional; expansion C1 only).
+    # Phase A / B scanners ignore this field.
+    futures: tuple[Book, ...] = ()
 
     def option_chain(self) -> dict[int, dict[float, dict[str, Book]]]:
         """expiry_ms → strike → {"C": Book, "P": Book}."""
@@ -305,10 +311,12 @@ def load_fixture(path: str | os.PathLike) -> list[Snapshot]:
                     next_rate=float(fr["next_rate"]) if fr.get("next_rate") is not None else None,
                     interval_sec=int(fr.get("interval_sec", 8 * 3600)),
                     next_funding_time_ms=fr.get("next_time_ms"),
+                    history=tuple(float(x) for x in fr.get("history") or ()),
                 )
                 if fr
                 else None,
                 options=tuple(Book.from_dict(o, "option") for o in s.get("options") or []),
+                futures=tuple(Book.from_dict(b, "future") for b in s.get("futures") or []),
                 spot_borrow_apr=(
                     float(s["spot_borrow_apr"])
                     if s.get("spot_borrow_apr") is not None
