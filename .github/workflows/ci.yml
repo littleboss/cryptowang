@@ -395,6 +395,7 @@ jobs:
                 'synthetic_fill=%s stale=%d illiquid=%d pass=%d'
                 % (len(rows), s['snapshots'], m['net_positive_rate'], m['cost_kill_rate'],
                    m['synthetic_fill_success_rate'], m['stale_book'], m['illiquid'], m['passes_threshold']))
+          "
 
       # Combo expansion C1–C4 (paper / read-only side branch, 04-risk conditional pass) on the
       # synthetic expansion fixture: offline, no keys. Every record must be observe_only /
