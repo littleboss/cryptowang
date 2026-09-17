@@ -10,9 +10,9 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 
 | 路径 | 内容 |
 |------|------|
-| `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（仅打包，无交易依赖） |
+| `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（唯一第三方运行时依赖：官方 `python-okx==0.4.4`，只经只读门面可达） |
 | `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）** |
-| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（公共行情 / 盘口 / funding GET；可选 `OKX_SIMULATED=1` 只读状态）、**Cost Engine v0**（`cost_engine.py`：全成本 / 净边 / breakeven funding 的可复用纸面算术，A/B 扫描器共用，研究侧支） |
+| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（标准库后端 `okx_readonly_client.py`；官方 SDK 只读门面 `okx_sdk_readonly.py`；公共行情 / 盘口 / funding GET，可选 `OKX_SIMULATED=1` 只读状态）、**Cost Engine v0**（`cost_engine.py`：全成本 / 净边 / breakeven funding 的可复用纸面算术，A/B 扫描器共用，研究侧支） |
 | `fixtures/proposals/` | 提案 JSON（v3：基线 vs B1），供策略模块 / CI 离线消费；无密钥 |
 | `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器 / 组合评分离线回放 / CI；Phase B 用双到期版本；**非行情证据** |
 | `fixtures/cost_engine/` | Cost Engine v0 的 JSON 用例（手算数字 + 拒绝用例：年化毛边、mark 作可执行价、买腿用 bid、单边簿、无依据 `calibrated=true`），供单测 / CI 离线回放；**非行情证据** |
@@ -25,7 +25,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 1. **无密钥**：不提交 API key、`.env`、提现权限。`.gitignore` 已挡常见密钥文件。
 2. **无提现 / 无跨所转账自动化**。
 3. **默认现货 / ≤1x**；`>2x` 标红另批。本仓 dry-run 与 local_paper 固定 `lever=1`。
-4. **默认 dry-run**：`will_send_http=false`。未获用户明确确认 + 风控放行前，不得实写 / live amend。允许的网络调用只有两类，且都是 **GET**：(a) 公共行情 K 线 / ticker 的只读 GET（`local_paper_grid.py --source okx-public`、`okx_readonly_client.py ticker|candles`，无签名、无密钥）；(b) `okx_readonly_client.py private-status` 在 **`OKX_SIMULATED=1` + 三个 env 变量齐全** 时对 OKX 模拟盘 账户 / Bot 状态的签名 GET。Trade / amend / transfer / withdraw 端点在代码层被拒绝，不实现。
+4. **默认 dry-run**：`will_send_http=false`。未获用户明确确认 + 风控放行前，不得实写 / live amend。允许的网络调用只有两类，且都是 **GET**：(a) 公共行情 K 线 / ticker 的只读 GET（`local_paper_grid.py --source okx-public`、`okx_readonly_client.py ticker|candles`，无签名、无密钥）；(b) `okx_readonly_client.py private-status` / `okx_sdk_readonly.py private-status` 在 **`OKX_SIMULATED=1` + 三个 env 变量齐全** 时对 OKX 模拟盘 账户 / Bot 状态的签名 GET。Trade / amend / transfer / withdraw 端点在代码层被拒绝，不实现。官方 SDK（`python-okx`）只允许以 **GET-only 子集** 出现：不 import `okx.Trade` / `okx.Funding` / `okx.SubAccount`，SDK 自带的 POST 方法在被门面继承后一律抛 `ReadOnlyViolation`（见 §6b）。
 5. **演示 fixture 的 `algoId`（默认 `demo-grid-eth-usdt-001`）不得用于 live amend。**
 6. 纸面结果 **≠ OKX Bot 净值 / 收益承诺**。回撤口径必须用 Bot `total_pnl_ratio`，不是 Freqtrade hyperopt 曲线。
 7. 先可证伪假设 → 再写代码 → 费用后回测 / 纸面。优化产出：diff + 前后对比 + 失效条件。
@@ -36,6 +36,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 - 模拟 venue 当前为 **`local_paper`**（OKX demo key 尚未到位，不接 `okx_demo`）。Day-0 metrics 为 bootstrap（0 新成交）；Day-1 起用 `tools/local_paper_grid.py` 产出。
 - 提案 v3（[fixtures/proposals](fixtures/proposals/)）：**立刻不改参**（保持 2200–3200 / 30 / SL 2150 / 1x）；纸面实验臂 **B1**（maxPx 2700、gridNum 20）风控**附条件允许**，只在 `local_paper` 对照跑，用 `strategies/grid_ab_compare.py`；采纳须另行确认。加仓 / 加杠杆已否决（H-C）。
 - 只读 OKX 客户端已入库（公共行情 GET；可选 `OKX_SIMULATED=1` 只读状态）。**没有** Trade / amend / withdraw 代码。
+- 官方 SDK `python-okx==0.4.4` 已作为 **只读子集** 依赖入库（`tools/okx_sdk_readonly.py`）：与标准库客户端同一套 CLI / JSON 契约，仅 GET；写路径在开 socket 之前抛错。**仍然不接 `okx_demo` venue，仍然 `will_send_http=false`。**
 - 纸面多腿套利扫描器 Phase A（`strategies/paper_arb_scanner.py`）已入库：**研究侧支，只读 / observe_only**，不替换网格主线；风控附条件通过（见 §8），live execution **不在**批准范围。
 - 纸面对冲组合评分 Phase B（`strategies/paper_combo_scanner.py`，B1 备兑 carry / B2 日历 vol / B3 带翼 25Δ RR）已入库：**研究侧支，只读 / observe_only / 全部 `relative_value`**，与 A 扫描器并列，不并入网格；风控附条件通过「只读指标 + 纸面成交」（见 §9），B2 delta 对冲**仅纸面模拟**，live 不在范围。Phase A 首扫净边全负 → B 是「显式 RV 组合研究」，不是「找回边」。
 - Cost Engine v0（`tools/cost_engine.py`，路线图 P0 / Phase C0）已入库：**纸面只读、observe_only、`calibrated=false`**。把 A/B 记录里的 `costs_bps` 算术升格为共用模块，输出 `all_in_cost_bps` / `net_edge_bps` / `breakeven_funding_rate` / 分量拆解；A/B 扫描器每条记录附 `cost_engine` 交叉校验块（须与 `costs_bps.total` 一致，`--no-cost-engine` 可关），`costs_bps` / `passes_threshold` 本身**不变**。拒绝 `current_funding × 365` 当净边，年化字段一律 `_ref` 展示（见 §10）。**不含** Fair-value（C1）/ Funding expectation（C3）/ Score schema / Execution；`04-risk` 附条件放行仅覆盖纸面工程。
@@ -45,13 +46,13 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 
 本仓用 [`uv`](https://docs.astral.sh/uv/) + `pyproject.toml` 管理 Python 环境。**这只是打包 / 依赖锁定，不是开通实盘。**
 
-- 运行时依赖为空：脚本仍是标准库，**没有**交易 / HTTP 下单客户端。
-- `uv sync` / `uv run` **≠** 下单、**≠** 注入密钥、**≠** 启用 freqtrade live。
+- 运行时依赖只有一个第三方包：官方 OKX SDK `python-okx==0.4.4`（精确 pin，连带 `httpx[http2]` / `requests` / `websockets` / `loguru` 等传递依赖，全部锁在 `uv.lock`）。它**只**通过 `tools/okx_sdk_readonly.py` 这层 GET-only 门面可达；`okx.Trade` 等写模块在整个仓库内没有任何 import（CI 用 AST 扫描断言）。其余脚本仍是标准库，`okx_readonly_client.py` 标准库后端原样保留。
+- `uv sync` / `uv run` **≠** 下单、**≠** 注入密钥、**≠** 启用 freqtrade live。装上 SDK ≠ 拥有下单能力——门面把 SDK 的 POST 方法全部替换为抛错。
 - 脚本保持在 `tools/` 与 `strategies/`，用 `uv run python …` 直接跑；没有把本仓装成可发单包。
 
 ## 如何运行
 
-先装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再同步环境（会按 `uv.lock` 建 `.venv`；运行时无需第三方包）：
+先装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再同步环境（会按 `uv.lock` 建 `.venv`，装入 pin 死的 `python-okx`；标准库脚本不依赖它）：
 
 ```bash
 uv sync
@@ -64,7 +65,7 @@ uv sync --group dev
 # 或默认也会装上 dev 组：uv sync
 ```
 
-仍可用系统 `python3` 直接跑（标准库即可）。推荐用 `uv run`，与 CI 一致。
+标准库脚本（含 `okx_readonly_client.py`）仍可用系统 `python3` 直接跑；只有 `okx_sdk_readonly.py` 需要 `.venv` 里的 `python-okx`。推荐统一用 `uv run`，与 CI 一致。
 
 ### 1. 网格费用敏感度（纸面）
 
@@ -268,13 +269,46 @@ uv run python tools/okx_readonly_client.py private-status --algo-id <demoAlgoId>
 
 公共只读端点（无密钥，供 §8 扫描器使用）：`GET /market/books`（盘口，`sz` 档；SWAP / OPTION 的 size 是**张数**，调用方按 `ctVal` 折成币）、`GET /public/funding-rate`、`GET /public/instruments`（`ctVal` / 行权价 / 到期）、`GET /market/tickers`。仍受同一道 `assert_read_only()` 闸门约束。
 
+### 6b. 官方 SDK 只读子集（`tools/okx_sdk_readonly.py`，依赖 `python-okx==0.4.4`）
+
+**为什么现在引入官方 SDK**：后续要对照 `okx_demo` 与 `local_paper` 时，希望端点常量、签名、`x-simulated-trading` 头都跟 OKX 官方实现（[okxapi/python-okx](https://github.com/okxapi/python-okx)）对齐，减少手写 HTTP 层与官方漂移的风险；同时把「装了 SDK 会不会顺手就能下单」这个问题在代码层封死，而不是靠约定。它是标准库客户端的**同契约替代后端**，不是新能力：同样的 `ticker | candles | private-status | policy` 子命令、同样的 JSON 字段、同样的退出码（无密钥 stub → 0，live key → 3）。
+
+**只读子集怎么实现**（三层闸，缺一不可）：
+
+1. **import 层**：整个文件只 import `okx.MarketData` / `okx.Account` / `okx.Grid` 三个读向模块；`okx.Trade`、`okx.Funding`、`okx.SubAccount`、`okx.Convert`、`okx.websocket` 等列入 `FORBIDDEN_SDK_MODULES`，`policy` 子命令与单测 / CI 都会检查 `sys.modules` 与源码 AST，出现即失败。
+2. **请求漏斗层**：SDK 所有 REST 调用都经过 `OkxClient._request(method, path, params)`，而 `OkxClient` 本身是 `httpx.Client`，所以还会经过 `send()`。门面用 `GatedMarketAPI / GatedAccountAPI / GatedGridAPI` 子类同时覆写这两处，复用 `okx_readonly_client.assert_read_only()`：非 GET、或路径不在只读白名单、或命中 `/trade/`、`amend`、`order-algo`、`withdraw`、`transfer` 等片段 → 在开 socket 前抛 `ReadOnlyViolation`。于是 SDK 自带的 `grid_amend_order_algo()`、`grid_stop_order_algo()`、`grid_order_algo()`、`set_leverage()`、`grid_withdraw_income()` 等 **POST 方法即便被调用也只会抛错**；`post/put/patch/delete` 也被替换为直接抛错。单测会**遍历 SDK 类上所有方法**逐个调用来证明这点，SDK 升级新增写方法也会被自动覆盖。
+3. **门面层**：`OkxSdkPublicClient` / `OkxSdkReadOnlyPrivateClient` 不暴露 SDK 对象，只提供显式读方法（`get_ticker/get_candles`、`get_balance/get_account_config/get_grid_pending|history|details|positions`）；`place_order/amend_algo/stop_algo/transfer/withdraw` 只存在于「抛错」形态。
+
+白名单是**同一份**：门面直接 import `okx_readonly_client` 的 `PUBLIC_READ_PATHS` / `PRIVATE_READ_PATHS`，所以 §6 为扫描器放开的 `books` / `funding-rate` / `instruments` / `tickers` 在 SDK 漏斗层同样被允许（仍是无密钥 GET），但门面**不**为它们提供读方法——§8 / §9 扫描器继续走标准库客户端；私有白名单未变。
+
+**公共行情（无密钥）**
+
+```bash
+uv run python tools/okx_sdk_readonly.py --help
+uv run python tools/okx_sdk_readonly.py ticker --inst-id ETH-USDT
+uv run python tools/okx_sdk_readonly.py candles --inst-id ETH-USDT --bar 5m --limit 288 --csv-out /tmp/eth-5m.csv
+uv run python tools/okx_sdk_readonly.py policy    # 离线：策略 + 已 import / 已加载的 okx 模块审计 + env 是否设置（只显示长度）
+```
+
+**可选：开启 OKX 模拟盘只读状态（签名 GET）**——与 §6 完全相同的四个环境变量，缺 `OKX_SIMULATED=1` 直接拒绝（退出码 3）；SDK 的 `flag`（`x-simulated-trading`）在私有路径硬编码为 `"1"`，构造函数不接受其他值：
+
+```bash
+export OKX_API_KEY=...            # 在 OKX「模拟交易」里创建，只勾读取权限
+export OKX_API_SECRET=...
+export OKX_API_PASSPHRASE=...
+export OKX_SIMULATED=1
+uv run python tools/okx_sdk_readonly.py private-status --ccy USDT [--algo-id <demoAlgoId>]
+```
+
+**硬门禁（评审按此拒收）**：无 Trade / 下单 / amend algo / 划转 / 提现可调路径；公共端点优先、无密钥；私有路径仅 GET、仅模拟盘；密钥只从 env 读、`repr` / CLI / SDK 日志都不打印（SDK 的 loguru `okx` 命名空间在 import 时即禁用，`debug` 永远为 False）；`will_send_http` 恒为 `false`；不新增任何 amend HTTP 客户端；只限现货 / ≤1x 语境。
+
 ### 7. 单测 / 冒烟
 
 ```bash
 uv run --no-dev python -m unittest discover -s tests -v
 ```
 
-覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘；策略模块的提案加载 / 三道拒绝（`will_send_http=true`、`lever=2`、加仓臂）、两臂同路径出成交、必填输出字段、deltas 一致性、H-A 7 日连败 / 重置、H-B 2pct MDD 边界、Day-1 库存风险规则、import 与 subprocess 引擎一致、CLI 落 JSON + markdown；只读客户端的 GET-only 闸门、trade/amend/withdraw 路径拒绝、live key 拒绝、`repr` 不泄露、HMAC 签名向量、假服务器上的 ticker / 分页 candles / 签名 GET 头、无密钥 stub；套利扫描器的硬门禁（mark/mid/last 作可执行价 → 拒绝；`action≠observe_only` / `will_send_http=true` → 拒绝；A1 非 `relative_value` → 拒绝；裸卖期权 → 拒绝；源码无 `/api/v5/trade` / `urlopen`）、A1 / A2 / A3 手算数字（funding × H、PCP conversion / reversal、box 权利金与隐含利率）、币本位权利金保守折算、perp 代理降级标注 + funding 计入成本、持续度连续样本 / 时长 / 重置、薄簿 `illiquid` / `insufficient_depth` / impact、safety_buffer = 分量之和、paper fill 块、fixture 回放全字段 + 卖箱永不 pass、CLI JSONL / summary、假 OKX 公共源（张数 × `ctVal`、行权价挑选、全部 GET）；Phase B 组合评分的硬门禁（`phase≠B` / `taxonomy≠relative_value` / `combo_id` 不匹配 / `hedge_mode` 越权 / 残留风险缺项 / 含 `risk_free`、`无风险`、`稳赚`、`guaranteed` 字样 / `live_hedge_http=true` / 裸卖 → 全部拒绝）、备兑规则（B1 短 call 须由 **spot** 名义覆盖、反向日历拒绝、无翼 RR 拒绝且不建记录）、Black-76 平价 / delta / 隐含波动率往返、B1 / B2 / B3 手算数字（备兑权利金边 = bid − ATM 参照公平价、funding × H、日历可执行价差 vs 平坦期限参照、RR 可执行偏离 × vega）、B1 负 funding 记成本 / 预测翻号失效、Δ 带 → moneyness 兜底、B2 纸面 delta 对冲成本（多头 perp 付 funding、收侧不记）、B3 滚动参照未满样本 → 失效、`--b3-paper-delta` 备选模式、buffer 含 `vol_path_haircut`、fixture 回放（三家族齐全、B1 / B2 越过 buffer → 持续度 → pass 路径、B3 越过但不 pass、A1 同窗对照、summary 无禁语）、Phase A fixture 兼容（单到期 → 零记录 + skipped 计数）、CLI、假 OKX 公共源全 GET；Cost Engine v0 的硬门禁（`action≠observe_only` / `will_send_http=true` / `annualized=true` / `tradable_claim_allowed=true` / 禁语 → 拒绝；`LegSpec` 用 mark / mid / last、买腿用 bid、卖腿用 ask、单边簿 → 拒绝；`gross_basis` 非持有期（annualized / apy / x365）→ 拒绝；`FundingLeg` 期数超一年 → 拒绝；`calibrated=true` 无依据 → 拒绝；源码无 `urllib` / `socket` / trade 路径且不 import 扫描器与网格模块）、八个分量原语手算数字（期权费用上限 + 结算费、半点差只记额外 crossings、VWAP 冲击、借币 / 转账 / 资本机会成本 / funding 不确定 / 对冲）、`leg_costs` 从 bid/ask 腿出 fees / spread / impact（含币本位 `quote_conv`）、双计拒绝、`all_in = Σ 四位小数分量`、`net = gross − all_in`、**breakeven 恒等式**（`headroom × H ≈ net`；把 breakeven 喂回去净边 ≈ 0；+1 bp → +H bp）、funding 记成本 + 其它毛边的 breakeven、无 funding / H=0 → `None` + reason、缺项 / 未知项 / 负项打 flag 不丢、`FundingLeg` 收付方向 / `min(|now|,|next|)` / 预测翻号归零、summary 聚合、fixture 用例全数复现 + 拒绝用例逐个命中、CLI 落盘 / 不匹配退出码 1 / `--help`；A/B 扫描器接线（每条记录 `cost_engine.all_in_cost_bps == costs_bps.total`、`net` 一致、A1 / B1 有 breakeven 且恒等式成立、A2 / A3 / B2 / B3 为 `None`、`--no-cost-engine` 只去掉该块其余字段逐项相等、`finalize_*` 对被改动的块拒绝、B 块必含 `vol_path_haircut`、A1 对照臂同开关）。全部离线（客户端 / 扫描器测试用本机 `http.server` 假 OKX）。
+覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘；策略模块的提案加载 / 三道拒绝（`will_send_http=true`、`lever=2`、加仓臂）、两臂同路径出成交、必填输出字段、deltas 一致性、H-A 7 日连败 / 重置、H-B 2pct MDD 边界、Day-1 库存风险规则、import 与 subprocess 引擎一致、CLI 落 JSON + markdown；只读客户端的 GET-only 闸门、trade/amend/withdraw 路径拒绝、live key 拒绝、`repr` 不泄露、HMAC 签名向量、假服务器上的 ticker / 分页 candles / 签名 GET 头、无密钥 stub；官方 SDK 门面的模块审计（`okx.Trade` 等未加载、源码 import 子集）、**遍历 SDK 全部方法**证明 POST 方法与非白名单 GET 都在 `httpx.send` 之前抛错（`unittest.mock` 挂在 `httpx.Client.send` 上断言从未被调用）、`post/put/patch/delete/request/stream/send` 写动词抛错、`flag=1` 强制、loguru 不泄露头、假服务器上的无密钥 ticker / 分页 candles / 带 `x-simulated-trading: 1` 的签名 GET、与标准库客户端输出逐字段一致、CLI stub / live key 拒绝 / 不回显密钥；套利扫描器的硬门禁（mark/mid/last 作可执行价 → 拒绝；`action≠observe_only` / `will_send_http=true` → 拒绝；A1 非 `relative_value` → 拒绝；裸卖期权 → 拒绝；源码无 `/api/v5/trade` / `urlopen`）、A1 / A2 / A3 手算数字（funding × H、PCP conversion / reversal、box 权利金与隐含利率）、币本位权利金保守折算、perp 代理降级标注 + funding 计入成本、持续度连续样本 / 时长 / 重置、薄簿 `illiquid` / `insufficient_depth` / impact、safety_buffer = 分量之和、paper fill 块、fixture 回放全字段 + 卖箱永不 pass、CLI JSONL / summary、假 OKX 公共源（张数 × `ctVal`、行权价挑选、全部 GET）；Phase B 组合评分的硬门禁（`phase≠B` / `taxonomy≠relative_value` / `combo_id` 不匹配 / `hedge_mode` 越权 / 残留风险缺项 / 含 `risk_free`、`无风险`、`稳赚`、`guaranteed` 字样 / `live_hedge_http=true` / 裸卖 → 全部拒绝）、备兑规则（B1 短 call 须由 **spot** 名义覆盖、反向日历拒绝、无翼 RR 拒绝且不建记录）、Black-76 平价 / delta / 隐含波动率往返、B1 / B2 / B3 手算数字（备兑权利金边 = bid − ATM 参照公平价、funding × H、日历可执行价差 vs 平坦期限参照、RR 可执行偏离 × vega）、B1 负 funding 记成本 / 预测翻号失效、Δ 带 → moneyness 兜底、B2 纸面 delta 对冲成本（多头 perp 付 funding、收侧不记）、B3 滚动参照未满样本 → 失效、`--b3-paper-delta` 备选模式、buffer 含 `vol_path_haircut`、fixture 回放（三家族齐全、B1 / B2 越过 buffer → 持续度 → pass 路径、B3 越过但不 pass、A1 同窗对照、summary 无禁语）、Phase A fixture 兼容（单到期 → 零记录 + skipped 计数）、CLI、假 OKX 公共源全 GET；Cost Engine v0 的硬门禁（`action≠observe_only` / `will_send_http=true` / `annualized=true` / `tradable_claim_allowed=true` / 禁语 → 拒绝；`LegSpec` 用 mark / mid / last、买腿用 bid、卖腿用 ask、单边簿 → 拒绝；`gross_basis` 非持有期（annualized / apy / x365）→ 拒绝；`FundingLeg` 期数超一年 → 拒绝；`calibrated=true` 无依据 → 拒绝；源码无 `urllib` / `socket` / trade 路径且不 import 扫描器与网格模块）、八个分量原语手算数字（期权费用上限 + 结算费、半点差只记额外 crossings、VWAP 冲击、借币 / 转账 / 资本机会成本 / funding 不确定 / 对冲）、`leg_costs` 从 bid/ask 腿出 fees / spread / impact（含币本位 `quote_conv`）、双计拒绝、`all_in = Σ 四位小数分量`、`net = gross − all_in`、**breakeven 恒等式**（`headroom × H ≈ net`；把 breakeven 喂回去净边 ≈ 0；+1 bp → +H bp）、funding 记成本 + 其它毛边的 breakeven、无 funding / H=0 → `None` + reason、缺项 / 未知项 / 负项打 flag 不丢、`FundingLeg` 收付方向 / `min(|now|,|next|)` / 预测翻号归零、summary 聚合、fixture 用例全数复现 + 拒绝用例逐个命中、CLI 落盘 / 不匹配退出码 1 / `--help`；A/B 扫描器接线（每条记录 `cost_engine.all_in_cost_bps == costs_bps.total`、`net` 一致、A1 / B1 有 breakeven 且恒等式成立、A2 / A3 / B2 / B3 为 `None`、`--no-cost-engine` 只去掉该块其余字段逐项相等、`finalize_*` 对被改动的块拒绝、B 块必含 `vol_path_haircut`、A1 对照臂同开关）。全部离线（客户端 / 扫描器测试用本机 `http.server` 假 OKX）。
 
 ### 8. 只读纸面多腿套利扫描器 · Phase A（`strategies/paper_arb_scanner.py`）
 
@@ -474,20 +508,21 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 
 **job `paper-smoke`（离线，阻塞）**
 
-1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
-2. 九个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
-3. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
-4. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
-5. `okx_readonly_client.py private-status` 在清空 `OKX_*` 环境后必须打印 `skipped=true`（无密钥 stub），`policy` 里 `will_send_http/order/amend/withdraw/transfer` 全为 false。
-6. `tools/cost_engine.py --full`（Cost Engine v0 fixture 用例离线回放，无网络、无密钥）：断言 `all_ok`、报告 `observe_only` / `will_send_http=false` / `trading_http` 全 false / `calibrated=false` / `tradable_claim_allowed=false`、三条拒绝用例各命中对应异常（年化毛边 → `NaiveAnnualizationRefused`、mark 作可执行价 → `ExecutablePriceViolation`、无依据标定 → `CalibrationClaimRefused`）、每条结果八个核心分量齐全、`all_in = Σ 分量`、`net = gross − all_in`、`annualized=false`、有 breakeven 的 `headroom × H ≈ net`。
-7. `paper_arb_scanner.py --source fixture --paper-fills`（离线 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、腿的 `price_type∈{bid,ask}` 且买 ask / 卖 bid、A1 为 `relative_value`、A2/A3 为 `identity_approx*`、`costs_bps.total` 存在、`paper_fill.order_sent=false`、三个家族都出现、卖箱永不 pass、`cost_engine` 块 `observe_only` / `calibrated=false` / `all_in_cost_bps == costs_bps.total` / 只有 A1 有 breakeven、summary 里 `trading_http` 全 false、`safety_buffer.calibrated=false`、`cost_engine.records` = 记录数且 breakeven 条数 = 快照数、H-A1/H-A2/H-A3 都有状态。
-8. `paper_combo_scanner.py --source fixture --paper-fills`（Phase B 双到期合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`phase=B`、`taxonomy=relative_value`、`combo_id` 与 `family` 对应、`hedge_mode` 在白名单、`residual_risks` 含家族强制名单、腿 bid/ask 且买 ask / 卖 bid、每条短期权腿都有 `cover`、`paper_delta_sim.live_hedge_http=false`（B2 必 `enabled=true`）、`costs_bps.vol_path_haircut` 与 `safety_buffer.vol_path_haircut_bps` 存在、`cost_engine` 块一致且含 `vol_path_haircut`、只有 B1 有 breakeven、记录文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、三家族齐全；summary 里 `live_delta_hedge=false`、`trading_http` 全 false、`calibrated=false`（buffer 与 cost_engine 两处）、`leverage_concept=1`、H-B1/H-B2/H-B3 都有状态、A1 同窗对照条数 = 快照数、`mainline_unchanged`。
-9. `python -m unittest discover -s tests`（标准库，无网络）。
-10. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 按锁文件同步运行时（标准库 + pin 死的 `python-okx`；不装 ruff、不装别的）。
+2. 十个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+3. **OKX SDK 审计**：AST 扫描 `tools/ strategies/ tests/` 下所有 `.py`，import 的 `okx*` 模块必须 ⊆ `{okx, okx.MarketData, okx.Account, okx.Grid}`；导入门面后 `sys.modules` 里不得出现 `okx.Trade` 等写模块；`policy` 子命令可离线运行。
+4. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
+5. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
+6. `okx_readonly_client.py private-status` 与 `okx_sdk_readonly.py private-status` 在清空 `OKX_*` 环境后都必须打印 `skipped=true`（无密钥 stub），`policy` 里 `will_send_http/order/amend/withdraw/transfer` 全为 false；SDK 门面给占位（非密钥）live 风格 key 但缺 `OKX_SIMULATED=1` 时必须退出码 3 且不回显。
+7. `tools/cost_engine.py --full`（Cost Engine v0 fixture 用例离线回放，无网络、无密钥）：断言 `all_ok`、报告 `observe_only` / `will_send_http=false` / `trading_http` 全 false / `calibrated=false` / `tradable_claim_allowed=false`、三条拒绝用例各命中对应异常（年化毛边 → `NaiveAnnualizationRefused`、mark 作可执行价 → `ExecutablePriceViolation`、无依据标定 → `CalibrationClaimRefused`）、每条结果八个核心分量齐全、`all_in = Σ 分量`、`net = gross − all_in`、`annualized=false`、有 breakeven 的 `headroom × H ≈ net`。
+8. `paper_arb_scanner.py --source fixture --paper-fills`（离线 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、腿的 `price_type∈{bid,ask}` 且买 ask / 卖 bid、A1 为 `relative_value`、A2/A3 为 `identity_approx*`、`costs_bps.total` 存在、`paper_fill.order_sent=false`、三个家族都出现、卖箱永不 pass、`cost_engine` 块 `observe_only` / `calibrated=false` / `all_in_cost_bps == costs_bps.total` / 只有 A1 有 breakeven、summary 里 `trading_http` 全 false、`safety_buffer.calibrated=false`、`cost_engine.records` = 记录数且 breakeven 条数 = 快照数、H-A1/H-A2/H-A3 都有状态。
+9. `paper_combo_scanner.py --source fixture --paper-fills`（Phase B 双到期合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`phase=B`、`taxonomy=relative_value`、`combo_id` 与 `family` 对应、`hedge_mode` 在白名单、`residual_risks` 含家族强制名单、腿 bid/ask 且买 ask / 卖 bid、每条短期权腿都有 `cover`、`paper_delta_sim.live_hedge_http=false`（B2 必 `enabled=true`）、`costs_bps.vol_path_haircut` 与 `safety_buffer.vol_path_haircut_bps` 存在、`cost_engine` 块一致且含 `vol_path_haircut`、只有 B1 有 breakeven、记录文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、三家族齐全；summary 里 `live_delta_hedge=false`、`trading_http` 全 false、`calibrated=false`（buffer 与 cost_engine 两处）、`leverage_concept=1`、H-B1/H-B2/H-B3 都有状态、A1 同窗对照条数 = 快照数、`mainline_unchanged`。
+10. `python -m unittest discover -s tests`（无网络）。
+11. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **job `public-read-smoke`（出网，`continue-on-error: true`，不阻塞）**
 
-对 OKX **公共** `ticker` / `candles` 做只读 GET（无密钥；`OKX_*` 显式置空），断言 `auth=none`、`read_only=true`、K 线按时间升序；再把这 12 根公开 K 线经 CSV 回放喂给 `grid_ab_compare.py`。这一步红只代表「runner 到 OKX 公共 API 不通」，不代表任何交易发生。
+对 OKX **公共** `ticker` / `candles` 做只读 GET（无密钥；`OKX_*` 显式置空），先走标准库客户端、再走官方 SDK 门面，断言 `auth=none`、`read_only=true`、K 线按时间升序；再把这 12 根公开 K 线经 CSV 回放喂给 `grid_ab_compare.py`。这一步红只代表「runner 到 OKX 公共 API 不通」，不代表任何交易发生。
 
 **CI 绿 ≠ 实盘。** 工作流不注入 Secrets、不 amend、不提现、不下单；唯一出网的是上面那个只读公共行情 GET。**推代码 ≠ live。** 不要在 Actions 里配置 API key / `.env`。
 
