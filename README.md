@@ -11,10 +11,10 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 | 路径 | 内容 |
 |------|------|
 | `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（唯一第三方运行时依赖：官方 `python-okx==0.4.4`，只经只读门面可达） |
-| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）** |
-| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（标准库后端 `okx_readonly_client.py`；官方 SDK 只读门面 `okx_sdk_readonly.py`；公共行情 / 盘口 / funding GET，可选 `OKX_SIMULATED=1` 只读状态）、**Cost Engine v0**（`cost_engine.py`：全成本 / 净边 / breakeven funding 的可复用纸面算术，A/B 扫描器共用，研究侧支） |
+| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）**、**只读纸面现货三角扫描器（菜单 T1：ETH-USDT / BTC-USDT / ETH-BTC，`same_venue_microstructure`，研究侧支）** |
+| `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（标准库后端 `okx_readonly_client.py`；官方 SDK 只读门面 `okx_sdk_readonly.py`；公共行情 / 盘口 / funding GET，可选 `OKX_SIMULATED=1` 只读状态）、**Cost Engine v0**（`cost_engine.py`：全成本 / 净边 / breakeven funding 的可复用纸面算术，A/B/T1 扫描器共用，研究侧支） |
 | `fixtures/proposals/` | 提案 JSON（v3：基线 vs B1），供策略模块 / CI 离线消费；无密钥 |
-| `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器 / 组合评分离线回放 / CI；Phase B 用双到期版本；**非行情证据** |
+| `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器 / 组合评分离线回放 / CI；Phase B 用双到期版本；T1 用三腿现货簿版本（各簿带自己的时间戳）；**非行情证据** |
 | `fixtures/cost_engine/` | Cost Engine v0 的 JSON 用例（手算数字 + 拒绝用例：年化毛边、mark 作可执行价、买腿用 bid、单边簿、无依据 `calibrated=true`），供单测 / CI 离线回放；**非行情证据** |
 | `tests/` | 标准库 `unittest` 冒烟 / 单测（合成路径必须出成交；只读客户端用本地假服务器，不出网） |
 | `notes/` | 筛选结论、Freqtrade 对照、v2 旁路笔记 |
@@ -40,6 +40,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 - 纸面多腿套利扫描器 Phase A（`strategies/paper_arb_scanner.py`）已入库：**研究侧支，只读 / observe_only**，不替换网格主线；风控附条件通过（见 §8），live execution **不在**批准范围。
 - 纸面对冲组合评分 Phase B（`strategies/paper_combo_scanner.py`，B1 备兑 carry / B2 日历 vol / B3 带翼 25Δ RR）已入库：**研究侧支，只读 / observe_only / 全部 `relative_value`**，与 A 扫描器并列，不并入网格；风控附条件通过「只读指标 + 纸面成交」（见 §9），B2 delta 对冲**仅纸面模拟**，live 不在范围。Phase A 首扫净边全负 → B 是「显式 RV 组合研究」，不是「找回边」。
 - Cost Engine v0（`tools/cost_engine.py`，路线图 P0 / Phase C0）已入库：**纸面只读、observe_only、`calibrated=false`**。把 A/B 记录里的 `costs_bps` 算术升格为共用模块，输出 `all_in_cost_bps` / `net_edge_bps` / `breakeven_funding_rate` / 分量拆解；A/B 扫描器每条记录附 `cost_engine` 交叉校验块（须与 `costs_bps.total` 一致，`--no-cost-engine` 可关），`costs_bps` / `passes_threshold` 本身**不变**。拒绝 `current_funding × 365` 当净边，年化字段一律 `_ref` 展示（见 §10）。**不含** Fair-value（C1）/ Funding expectation（C3）/ Score schema / Execution；`04-risk` 附条件放行仅覆盖纸面工程。
+- 纸面现货三角扫描器 T1（`strategies/paper_triangle_scanner.py`，菜单 `demo-strategy-menu-stable-edge-v1` 的 T1，`04-risk` 同日**附条件放行只读 / paper**）已入库：**研究侧支，只读 / observe_only / `taxonomy=same_venue_microstructure`（禁 `risk_free`）**，白名单固定 `ETH-USDT` · `BTC-USDT` · `ETH-BTC` 双向环；三腿簿时间戳偏差 > 200 ms → `stale_book` 不计 pass；每腿半点差 > 15 bp → `illiquid`；**毛边 / 净边 / 成本拆解全部来自 `tools/cost_engine.py evaluate_legs`**（模块自己不算净边）；`residual_risks` 必含非原子三腿 / 残留库存。汇总只报 `net_positive_rate` / `cost_kill_rate` / 纸面合成成交率（见 §11）。**本批不授权任何 demo 下单**；不并入网格主线。
 - 本仓只入库纸面工具；**push ≠ 实盘**。
 
 ## 包装说明（仅工程，不是实盘）
@@ -502,6 +503,74 @@ res.all_in_cost_bps, res.net_edge_bps, res.breakeven_funding_rate   # 47.0013, -
 
 **验收（路线图 P0）**：单测固定 fixtures ✔；未标定不得 `passes_threshold` 话术升级 ✔（引擎不产生 `passes_threshold`，A/B 的门限逻辑原样保留，且块内恒 `tradable_claim_allowed=false`）。**下一拍**（均须新的 `04-risk`）：P1 Fair-value / basis、P2 Funding expectation（与本模块 breakeven 对照）、P3 Opportunity Score schema、P4 Radar `_ref` 字段。
 
+`LegSpec` 自 T1 起多一个**可选** `slip_crossings`（默认 `None` = 沿用 `crossings − 1`，A/B 数值不变）：把「记多少次额外半点差」与「收多少次手续费」解耦。单程多腿现货环用 `crossings=1`（每腿一次手续费）+ `slip_crossings=1`（每腿再记一次半点差，作非原子重报价 haircut）。
+
+### 11. 只读纸面现货三角扫描器 · 菜单 T1（`strategies/paper_triangle_scanner.py`）
+
+**研究侧支，纸面 / 只读，不替换现货网格 / `local_paper` 主线。** 对应 `03-proposals/2026-09-17-demo-strategy-menu-stable-edge-v1.md` §2.1 T1 与 `04-risk/2026-09-17-demo-strategy-menu-stable-edge-v1.md` 的 **附条件放行：D0–D3 只读扫描 + paper fills；本批不授权 demo 下单；live 否决**。**合 PR ≠ 放行任何下单。** 本节不含、也不会含「三角稳定利润」结论：菜单 §0.3 的已知事实是 A+B 95 条记录 `net>0 = 0%`，T1 的假设 `H-T1` 在净边未复现前**视为未证伪**，扫描器的任务就是给出可证伪的数字。
+
+代码层硬门禁（都有单测；fixture 覆盖每条路径）：
+
+| 门禁（04-risk 标定） | 实现 |
+|----|------|
+| `action` 恒 `observe_only`，`will_send_http` 恒 `false` | 模块常量 + `finalize_record()`；改了就抛 `ObserveOnlyViolation`。**无** Trade / amend / withdraw / transfer 路径；唯一网络路径是 `tools/okx_readonly_client.py` 的公共 `GET /market/books`（`--source okx-public`，默认 fixture 离线）。单测断言源码不含 `/api/v5/trade`、`urlopen`、`POST`、`place_order(`、`amend_algo(`、`withdraw(`、`cancel_order(`，且不 import 网格模块 |
+| **白名单**：`ETH-USDT` · `BTC-USDT` · `ETH-BTC`（双向环） | `Triangle.validate()`：其他三元组 → `TriangleNotWhitelisted`（CLI 退出码 1）；扩其他三元组须点名另批 |
+| taxonomy | 恒 `same_venue_microstructure`；`risk_free` / `无风险` / `稳赚` / `guaranteed` 出现在任何字段 → `ForbiddenLabelViolation`；每条记录带 `same_venue_microstructure_not_riskless` + `non_atomic_three_leg` flag |
+| 可执行价只能 bid / ask | 买腿 `ask`、卖腿 `bid`（`CycleLeg.__post_init__` + `finalize_record`）；mid / mark / last 拒绝；**单边簿跳过该方向不猜**（`summary.skipped.one_sided_book`） |
+| **同步**：三簿共窗时间戳 | `book_sync`：`skew = max(ts) − min(ts)`；`> --max-book-skew-ms`（默认 **200**）→ `stale_book`；缺时间戳 → `book_timestamp_missing`；两者都是失效 flag，**记录照常落盘但永不 `passes_threshold`**，且 `synthetic_fill.ok=false` |
+| **流动性**：每腿半点差 ≤ 15 bp | `half_spread_bps = (ask − bid)/2 / bid`（宽度度量，不是价）；`> --max-half-spread-bps`（默认 **15**）→ `half_spread_over_cap` + `illiquid`；另沿用 Phase A 深度门（`top_n` 档 ≥ `qty × depth_mult`、能完整吃到 `qty`，否则 `insufficient_depth`） |
+| **成本 ≥ fees + half_spread/slip + impact，且净边只经 Cost Engine** | 三条 `ce.LegSpec`（spot，`crossings=1`，`slip_crossings=--nonatomic-slip-half-spreads`，VWAP 来自吃簿）→ **`ce.evaluate_legs()`**；记录的 `gross_edge_bps` / `net_edge_bps` / `costs_bps.*` / `costs_bps.total` **逐字取自** `cost_engine` 块（`net_edge_source="tools/cost_engine.py:evaluate_legs"`）；`finalize_record` 校验三者与块一致（1e-9），不一致拒绝。模块**没有**自己的净边算术。单测用 spy 断言 `evaluate_legs` 真被调用 |
+| `residual_risks` 必填 | 恒含 `non_atomic_three_leg`、`leftover_inventory_on_partial_or_cancelled_leg`、`impact_and_queue_position`、`fee_tier_uncertainty`、`book_staleness_between_legs`、`demo_vs_live_liquidity_gap`；缺任何一项拒绝 |
+| 杠杆概念 1x | `leverage_concept=1`；`margin_capital_required = home 名义`（现货全款） |
+
+**环与算术**（home = USDT，默认 `--notional-quote 100` USDT 推一圈）
+
+| direction | 路径 | 腿（买 @ask / 卖 @bid） | 毛边 > 0 条件 |
+|-----------|------|--------------------------|--------------|
+| `usdt_eth_btc_usdt` | USDT → ETH → BTC → USDT | 买 ETH-USDT @ask → 卖 ETH-BTC @bid → 卖 BTC-USDT @bid | `bid(ETH-BTC) > ask(ETH-USDT) / bid(BTC-USDT)` |
+| `usdt_btc_eth_usdt` | USDT → BTC → ETH → USDT | 买 BTC-USDT @ask → 买 ETH-BTC @ask → 卖 ETH-USDT @bid | `ask(ETH-BTC) < bid(ETH-USDT) / ask(BTC-USDT)` |
+
+```
+gross_quote  = home_out − home_in                       # 三腿 bid/ask 串乘，未扣成本
+gross / net / costs  ←  cost_engine.evaluate_legs(...)   # 唯一来源
+  fees              = Σ 腿可执行名义 × spot_taker（10 bp 占位）× 1 crossing
+  half_spread_slip  = Σ (ask−bid)/2 × qty × slip_crossings（默认 1：非原子重报价 haircut）
+  impact            = Σ |VWAP − 一档| × qty（按 qty 吃簿）
+  borrow / transfer / funding_uncertainty / hedge_rebalance = 0；capital_opp = N × ref_rate_apr × 0（环在秒级，hold_years=0）
+safety_buffer_bps = fee_roundtrip(记录自己的 fees) + slip 5 + nonatomic 5 + model 5   # 分量之和，calibrated=false
+passes_threshold  = net > buffer ∧ persistence.ok ∧ liquidity.ok ∧ book_sync.ok ∧ 无失效 flag
+```
+
+`ETH-BTC` 腿以 BTC 计价，成本折算到 USDT 一律用 **BTC-USDT ask**（`quote_conv_to_home`，偏保守）。`bps` 相对 `home_in`（`notional_basis="home_ccy_notional_in"`）。
+
+**输出**（每条一行 JSON）：`direction` / `triangle`（路径、`home_in` / `home_out_before_costs`、`cross_exec` vs `cross_implied_from_directs`、`cross_favourable_deviation_bps`）、三腿 `legs`（qty、可执行价、`price_type`、计价币、`quote_conv_to_home`、簿时间戳）、`executable_prices`、`book_sync`（每簿 ts、`skew_ms`、`ok`）、`liquidity`（每腿 `half_spread_bps` / 深度 / VWAP / `complete`）、`gross_edge_bps` / `costs_bps` / `net_edge_bps` / `dominant_cost_component`、`cost_engine` 块、`safety_buffer`、`gross_positive` / `net_positive` / `cost_killed` / `edge_exceeds_buffer` / `passes_threshold` / `invalidated_by`、`synthetic_fill`（三腿在「同时可成交」假设下能否全部吃完；`order_sent` 恒 false）、`residual_risks`、`risk_flags`、`hypothesis_id=H-T1`。
+
+**summary**（`--summary-out`）：`metrics.net_positive_rate`（`net_edge_bps > 0` 占比）、`cost_kill_rate`（`gross > 0 ∧ net ≤ 0` 在 `gross > 0` 中占比）、`synthetic_fill_success_rate`、`stale_book` / `illiquid` 计数、越过 buffer / pass 数、净边中位 / 最大、`dominant_cost_component` 直方图；按 `directions` 分拆；`H-T1` 状态只有 `no_samples` / `insufficient_samples_for_persistence` / `no_pass_on_window` / `not_yet_falsified_on_window`；`cost_engine` 聚合；完整 config / policy / `mainline_unchanged`。
+
+```bash
+uv run python strategies/paper_triangle_scanner.py --help
+
+# 离线：回放合成三腿 fixture（8 快照 × 30s：无边 → 交叉盘 +20 bp 被成本杀 → +100 bp 越过 buffer 并在第 3 次持续后 pass
+# → 交叉簿滞后 350 ms 标 stale_book → 半点差 27 bp 标 illiquid → 交叉 bid 深度不足合成成交失败；全部合成，非行情）
+uv run python strategies/paper_triangle_scanner.py --source fixture --out /tmp/t1.jsonl \
+  --summary-out /tmp/t1-summary.json --print-summary --quiet
+
+# 只看越过 buffer 的；把 venue 标成 okx_demo（仅标签，公共簿同源）
+uv run python strategies/paper_triangle_scanner.py --only-exceeding --venue okx_demo
+
+# 只读 live 观察：OKX 公共盘口 GET（无密钥），三腿各 1 个 GET / 快照，10 个快照 × 20s
+uv run python strategies/paper_triangle_scanner.py --source okx-public --samples 10 --interval-sec 20 \
+  --out /tmp/t1-live.jsonl --summary-out /tmp/t1-live-summary.json
+
+# 收紧 / 放宽门（都会写进 summary.config）；扩白名单外三元组会被拒绝
+uv run python strategies/paper_triangle_scanner.py --max-book-skew-ms 100 --max-half-spread-bps 10 --nonatomic-slip-half-spreads 2
+uv run python strategies/paper_triangle_scanner.py --leg-a SOL   # → error: … not on the 04-risk whitelist
+```
+
+`okx-public` 每快照 3 个 GET（三腿现货簿，size 即币数）；三簿顺序拉取，偏差按 OKX 返回的簿时间戳算并过 200 ms 门——**live 只读观察里 `stale_book` 会经常出现，这是门禁在工作，不是 bug**。
+
+**分阶段（不得跳级，同 04-risk D0–D3）**：① `--source fixture` 回放 → ② `--source okx-public` 只读观察 → ③ 汇总 `net_positive_rate` / `cost_kill_rate` / 合成成交率 → ④ 若净边可复现，另写 demo 小仓规格并经 **04-risk 再批 + 用户明确确认**。**本模块止步于 ③。** 明确不做：demo / live 下单、IOC、跨所延迟套利、用 mid / mark 报边、白名单外三元组、>1x、并入网格主线、任何收益 / APY / 「稳赚」话术。fixture 里越过 buffer 的记录是合成的，不代表市场上存在机会。
+
 ## CI
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
@@ -509,7 +578,7 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 **job `paper-smoke`（离线，阻塞）**
 
 1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 按锁文件同步运行时（标准库 + pin 死的 `python-okx`；不装 ruff、不装别的）。
-2. 十个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+2. 十一个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
 3. **OKX SDK 审计**：AST 扫描 `tools/ strategies/ tests/` 下所有 `.py`，import 的 `okx*` 模块必须 ⊆ `{okx, okx.MarketData, okx.Account, okx.Grid}`；导入门面后 `sys.modules` 里不得出现 `okx.Trade` 等写模块；`policy` 子命令可离线运行。
 4. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
 5. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
@@ -517,8 +586,9 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 7. `tools/cost_engine.py --full`（Cost Engine v0 fixture 用例离线回放，无网络、无密钥）：断言 `all_ok`、报告 `observe_only` / `will_send_http=false` / `trading_http` 全 false / `calibrated=false` / `tradable_claim_allowed=false`、三条拒绝用例各命中对应异常（年化毛边 → `NaiveAnnualizationRefused`、mark 作可执行价 → `ExecutablePriceViolation`、无依据标定 → `CalibrationClaimRefused`）、每条结果八个核心分量齐全、`all_in = Σ 分量`、`net = gross − all_in`、`annualized=false`、有 breakeven 的 `headroom × H ≈ net`。
 8. `paper_arb_scanner.py --source fixture --paper-fills`（离线 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、腿的 `price_type∈{bid,ask}` 且买 ask / 卖 bid、A1 为 `relative_value`、A2/A3 为 `identity_approx*`、`costs_bps.total` 存在、`paper_fill.order_sent=false`、三个家族都出现、卖箱永不 pass、`cost_engine` 块 `observe_only` / `calibrated=false` / `all_in_cost_bps == costs_bps.total` / 只有 A1 有 breakeven、summary 里 `trading_http` 全 false、`safety_buffer.calibrated=false`、`cost_engine.records` = 记录数且 breakeven 条数 = 快照数、H-A1/H-A2/H-A3 都有状态。
 9. `paper_combo_scanner.py --source fixture --paper-fills`（Phase B 双到期合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`phase=B`、`taxonomy=relative_value`、`combo_id` 与 `family` 对应、`hedge_mode` 在白名单、`residual_risks` 含家族强制名单、腿 bid/ask 且买 ask / 卖 bid、每条短期权腿都有 `cover`、`paper_delta_sim.live_hedge_http=false`（B2 必 `enabled=true`）、`costs_bps.vol_path_haircut` 与 `safety_buffer.vol_path_haircut_bps` 存在、`cost_engine` 块一致且含 `vol_path_haircut`、只有 B1 有 breakeven、记录文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、三家族齐全；summary 里 `live_delta_hedge=false`、`trading_http` 全 false、`calibrated=false`（buffer 与 cost_engine 两处）、`leverage_concept=1`、H-B1/H-B2/H-B3 都有状态、A1 同窗对照条数 = 快照数、`mainline_unchanged`。
-10. `python -m unittest discover -s tests`（无网络）。
-11. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+10. `paper_triangle_scanner.py --source fixture`（T1 三腿合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`menu_id=T1`、`taxonomy=same_venue_microstructure`、三腿恰为白名单 `ETH-USDT` / `BTC-USDT` / `ETH-BTC` 且 bid/ask 买 ask / 卖 bid、`leverage_concept=1`、`residual_risks` 含非原子三腿 / 残留库存、`risk_flags` 含 `non_atomic_three_leg`、`gross_edge_bps` / `net_edge_bps` / `costs_bps.total` **等于** `cost_engine` 块对应字段、`fees` 与 `half_spread_slip` > 0、`book_sync.max_skew_ms=200`、`liquidity.max_half_spread_bps=15`、带 `stale_book` / `illiquid` 的记录 `passes_threshold=false`、`synthetic_fill.order_sent=false`、文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、双向都出现；summary 里 `trading_http` 全 false、buffer 与 cost_engine 两处 `calibrated=false`、`stale_book` / `illiquid` / `cost_killed` 计数 > 0（fixture 覆盖了这些路径）、`net_positive_rate` / `cost_kill_rate` / `synthetic_fill_success_rate` 非空、`H-T1` 有状态、`mainline_unchanged`。
+11. `python -m unittest discover -s tests`（无网络）。
+12. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **job `public-read-smoke`（出网，`continue-on-error: true`，不阻塞）**
 

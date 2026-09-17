@@ -49,6 +49,7 @@ jobs:
           uv run --locked --no-dev python tools/okx_readonly_client.py --help
           uv run --locked --no-dev python strategies/paper_arb_scanner.py --help
           uv run --locked --no-dev python strategies/paper_combo_scanner.py --help
+          uv run --locked --no-dev python strategies/paper_triangle_scanner.py --help
           uv run --locked --no-dev python tools/cost_engine.py --help
           uv run --locked --no-dev python tools/okx_sdk_readonly.py --help
 
@@ -333,6 +334,66 @@ jobs:
           print('paper_combo_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
                 {f: (v['records'], v['edge_exceeds_buffer'], v['passes_threshold'])
                  for f, v in s['families'].items()})
+          "
+
+      # Paper spot triangle scanner (menu T1) on the synthetic ETH/BTC/USDT fixture: offline, no
+      # keys. Every record must be observe_only / will_send_http=false / same_venue_microstructure
+      # (never risk_free) with three bid/ask-only spot legs on the 04-risk whitelist, mandatory
+      # residual_risks (non-atomic three-leg), a book_sync block (skew > 200 ms → stale_book, never
+      # passes), a per-leg half-spread cap (15 bp → illiquid) and gross / net / costs taken verbatim
+      # from the cost_engine block. Fixture dislocations are synthetic code-path checks, not evidence.
+      - name: Paper triangle scanner (T1) — fixture replay, observe_only, cost_engine is the edge
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python strategies/paper_triangle_scanner.py --source fixture \
+            --out /tmp/t1.jsonl --summary-out /tmp/t1-summary.json --quiet
+          uv run --locked --no-dev python -c "
+          import json
+          rows = [json.loads(l) for l in open('/tmp/t1.jsonl') if l.strip()]
+          s = json.load(open('/tmp/t1-summary.json'))
+          assert rows, 'no records'
+          need_rr = {'non_atomic_three_leg', 'leftover_inventory_on_partial_or_cancelled_leg'}
+          legs_ok = {'ETH-USDT', 'BTC-USDT', 'ETH-BTC'}
+          for r in rows:
+              assert r['action'] == 'observe_only', r['action']
+              assert r['will_send_http'] is False, r['will_send_http']
+              assert r['menu_id'] == 'T1' and r['taxonomy'] == 'same_venue_microstructure', r['taxonomy']
+              assert set(r['instruments']) == legs_ok, r['instruments']
+              assert len(r['legs']) == 3 and r['leverage_concept'] == 1
+              assert need_rr <= set(r['residual_risks']), r['residual_risks']
+              assert 'non_atomic_three_leg' in r['risk_flags']
+              for leg in r['legs']:
+                  assert leg['price_type'] in ('bid', 'ask'), leg
+                  assert leg['price_type'] == ('ask' if leg['side'] == 'buy' else 'bid'), leg
+              ce = r['cost_engine']
+              assert ce['action'] == 'observe_only' and ce['will_send_http'] is False, ce
+              assert ce['calibrated'] is False and ce['tradable_claim_allowed'] is False, ce
+              assert r['net_edge_bps'] == ce['net_edge_bps'] and r['gross_edge_bps'] == ce['gross_edge_bps']
+              assert r['costs_bps']['total'] == ce['all_in_cost_bps']
+              assert r['costs_bps']['fees'] > 0 and r['costs_bps']['half_spread_slip'] > 0, r['costs_bps']
+              assert r['book_sync']['max_skew_ms'] == 200 and r['liquidity']['max_half_spread_bps'] == 15.0
+              if 'stale_book' in r['risk_flags'] or 'illiquid' in r['risk_flags']:
+                  assert r['passes_threshold'] is False, 'stale / illiquid can never pass'
+              assert r['synthetic_fill']['order_sent'] is False
+              text = json.dumps(r, ensure_ascii=False).lower()
+              for bad in ('risk_free', '无风险', '稳赚', 'guaranteed'):
+                  assert bad not in text, bad
+          assert {r['direction'] for r in rows} == {'usdt_eth_btc_usdt', 'usdt_btc_eth_usdt'}
+          m = s['metrics']
+          assert s['action'] == 'observe_only' and s['will_send_http'] is False and s['menu_id'] == 'T1'
+          assert all(v is False for v in s['trading_http'].values()), s['trading_http']
+          assert s['config']['safety_buffer']['calibrated'] is False and s['config']['leverage_concept'] == 1
+          assert s['config']['max_book_skew_ms'] == 200 and s['config']['max_half_spread_bps'] == 15.0
+          assert s['cost_engine']['records'] == len(rows) and s['cost_engine']['calibrated'] is False
+          assert m['stale_book'] > 0 and m['illiquid'] > 0 and m['cost_killed'] > 0, m
+          for k in ('net_positive_rate', 'cost_kill_rate', 'synthetic_fill_success_rate'):
+              assert m[k] is not None, k
+          assert 'H-T1' in s['hypotheses'] and s['data_source']['http_fetch'] is False
+          assert s['mainline_unchanged'] == 'spot_grid_local_paper'
+          print('paper_triangle_scanner: %d records / %d snapshots ok; net>0 rate=%s cost_kill_rate=%s '
+                'synthetic_fill=%s stale=%d illiquid=%d pass=%d'
+                % (len(rows), s['snapshots'], m['net_positive_rate'], m['cost_kill_rate'],
+                   m['synthetic_fill_success_rate'], m['stale_book'], m['illiquid'], m['passes_threshold']))
           "
 
       - name: Unit tests (stdlib unittest, no network)
