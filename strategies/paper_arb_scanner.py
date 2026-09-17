@@ -19,7 +19,11 @@ Hard gates (enforced in code, tested, not just documented):
   * safety_buffer_bps is the *sum of components* (fee_roundtrip + slip + funding_uncert +
     model_haircut), configurable, reported as `calibrated: false` unless the caller says
     otherwise. Nothing here is a return promise; relative-value records carry an explicit
-    "not riskless" flag.
+    "not riskless" flag;
+  * optional `cost_engine` block (tools/cost_engine.py, Cost Engine v0, roadmap P0): the same
+    quote-currency buckets re-summed by the shared engine (must reproduce costs_bps.total),
+    plus the breakeven per-interval funding rate for A1; calibrated=false, no annualised edge,
+    no tradable claim. `--no-cost-engine` omits it. costs_bps / passes_threshold are unchanged.
 
 The spot-grid / local_paper mainline is untouched: this module does not import or alter
 tools/local_paper_grid.py or strategies/grid_ab_compare.py.
@@ -42,6 +46,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import cost_engine as ce  # noqa: E402
 import okx_readonly_client as okx  # noqa: E402
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -389,6 +394,10 @@ class ScanConfig:
     paper_fills: bool = False
     paper_extra_slip_bps: float = 5.0
     max_box_pairs: int = 6
+    # Cost Engine v0 cross-check block on every record (tools/cost_engine.py). Additive only:
+    # costs_bps / net_edge_bps / passes_threshold are computed exactly as before; the block
+    # must reproduce costs_bps.total and adds breakeven_funding. calibrated stays False in v0.
+    cost_engine: bool = True
     fees: FeeSchedule = field(default_factory=FeeSchedule)
     buffer: SafetyBuffer = field(default_factory=SafetyBuffer)
 
@@ -420,6 +429,13 @@ class ScanConfig:
             "paper_extra_slip_bps": self.paper_extra_slip_bps,
             "max_box_pairs": self.max_box_pairs,
             "leverage_concept": 1,
+            "cost_engine": {
+                "enabled": self.cost_engine,
+                "engine": ce.ENGINE,
+                "version": ce.VERSION,
+                "calibrated": False,
+                "tradable_claim_allowed": False,
+            },
             "fees": self.fees.to_dict(),
             "safety_buffer": {
                 "fee_roundtrip_bps": self.buffer.fee_roundtrip_bps,
@@ -667,6 +683,8 @@ def build_record(
     tracker: PersistenceTracker,
     persistence_key: str,
     extra: dict,
+    funding_ctx: ce.FundingContext | None = None,
+    hold_years: float | None = None,
 ) -> dict:
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family}")
@@ -681,6 +699,20 @@ def build_record(
     costs_bps["total"] = round(sum(costs_bps[k] for k in COST_KEYS), 4)
     gross_bps = round(bps(gross_quote, notional_quote), 4)
     net_bps = round(gross_bps - costs_bps["total"], 4)
+    engine_block = (
+        cost_engine_block(
+            gross_quote=gross_quote,
+            notional_quote=notional_quote,
+            costs_quote=costs_quote,
+            cost_keys=COST_KEYS,
+            costs_bps_total=costs_bps["total"],
+            net_bps=net_bps,
+            hold_years=hold_years,
+            funding_ctx=funding_ctx,
+        )
+        if cfg.cost_engine
+        else None
+    )
 
     buffer = cfg.buffer.resolve(costs_bps["fees"])
     flags = sorted(set(risk_flags) | set(liq_flags))
@@ -729,10 +761,46 @@ def build_record(
         "source_inspiration": SOURCE_INSPIRATION,
         "cross_checked_inbox": CROSS_CHECKED_INBOX,
     }
+    if engine_block is not None:
+        rec["cost_engine"] = engine_block
     rec.update(extra)
     if cfg.paper_fills:
         rec["paper_fill"] = paper_fill(legs, books, notional_quote / cfg.qty, net_bps, cfg)
     return finalize_record(rec)
+
+
+def cost_engine_block(
+    *,
+    gross_quote: float,
+    notional_quote: float,
+    costs_quote: dict[str, float],
+    cost_keys: tuple[str, ...],
+    costs_bps_total: float,
+    net_bps: float,
+    hold_years: float | None,
+    funding_ctx: ce.FundingContext | None,
+) -> dict:
+    """Cost Engine v0 (tools/cost_engine.py) on the record's own quote-currency buckets.
+
+    The engine must reproduce the record's `costs_bps.total` and `net_edge_bps` exactly (same
+    buckets, same rounding); a mismatch is a bug and is refused, not logged. It adds the
+    breakeven per-interval funding rate where funding is the thesis (A1 / B1), `None` with a
+    reason otherwise. Always `calibrated=False` in v0; never a tradable-APY claim.
+    """
+    buckets = {k: costs_quote.get(k, 0.0) for k in cost_keys}
+    res = ce.evaluate(
+        gross_quote=gross_quote,
+        notional_quote=notional_quote,
+        components_quote=buckets,
+        hold_years=hold_years,
+        funding=funding_ctx,
+    )
+    if abs(res.all_in_cost_bps - costs_bps_total) > 1e-6 or abs(res.net_edge_bps - net_bps) > 1e-6:
+        raise ValueError(
+            f"cost_engine mismatch: all_in {res.all_in_cost_bps} vs costs_bps.total "
+            f"{costs_bps_total}; net {res.net_edge_bps} vs {net_bps}"
+        )
+    return res.to_dict()
 
 
 def finalize_record(rec: dict) -> dict:
@@ -756,6 +824,14 @@ def finalize_record(rec: dict) -> dict:
             raise ExecutablePriceViolation(f"refused: leg price_type {leg['price_type']!r}")
     if "total" not in rec["costs_bps"]:
         raise ValueError("costs_bps.total required")
+    ceb = rec.get("cost_engine")
+    if ceb is not None:
+        if ceb.get("action") != ACTION or ceb.get("will_send_http") is not False:
+            raise ObserveOnlyViolation("refused: cost_engine block is not observe_only")
+        if ceb.get("tradable_claim_allowed") is not False or ceb.get("annualized") is not False:
+            raise ValueError("refused: cost_engine block claims tradable / annualised edge")
+        if abs(ceb["all_in_cost_bps"] - rec["costs_bps"]["total"]) > 1e-6:
+            raise ValueError("cost_engine.all_in_cost_bps must equal costs_bps.total")
     return rec
 
 
@@ -931,6 +1007,13 @@ class ArbScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_A1}|{spot.inst_id}|{perp.inst_id}|{direction}",
             extra=extra,
+            funding_ctx=ce.FundingContext(
+                intervals=float(H),
+                interval_sec=fr.interval_sec,
+                funding_gross_quote=funding_quote,
+                rate_used_per_interval=f_used,  # received by the position (direction applied)
+            ),
+            hold_years=hold_years,
         )
         return [rec]
 
@@ -1113,6 +1196,7 @@ class ArbScanner:
             tracker=self.tracker,
             persistence_key=f"{family}|{anchor.inst_id}|{expiry_ms}|{K}",
             extra=extra,
+            hold_years=T,  # funding is a cost here (perp proxy), not the thesis → no breakeven
         )
 
     # ---- A3 box spread implied financing (identity_approx)
@@ -1251,6 +1335,7 @@ class ArbScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_A3}|{expiry_ms}|{k1}|{k2}|{direction}",
             extra=extra,
+            hold_years=T,
         )
 
 
@@ -1300,6 +1385,9 @@ def summarize(records: list[dict], snapshots: int, cfg: ScanConfig, source: dict
         "records": len(records),
         "families": fam,
         "hypotheses": hyp,
+        "cost_engine": ce.summarize_blocks(
+            [r["cost_engine"] for r in records if "cost_engine" in r], enabled=cfg.cost_engine
+        ),
         "config": cfg.to_dict(),
         "data_source": source,
         "policy": okx.POLICY,
@@ -1502,6 +1590,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--paper-fills", action="store_true")
     p.add_argument("--paper-extra-slip-bps", type=float, default=5.0)
+    p.add_argument(
+        "--no-cost-engine",
+        action="store_true",
+        help="omit the Cost Engine v0 cross-check block (cost_engine) from records / summary",
+    )
 
     p.add_argument("--out", default="", help="JSONL records file (default stdout)")
     p.add_argument("--summary-out", default="", help="summary JSON file")
@@ -1528,6 +1621,7 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
         paper_fills=args.paper_fills,
         paper_extra_slip_bps=args.paper_extra_slip_bps,
         max_box_pairs=args.max_box_pairs,
+        cost_engine=not args.no_cost_engine,
         fees=FeeSchedule(
             spot_taker_bps=args.fee_spot_bps,
             perp_taker_bps=args.fee_perp_bps,

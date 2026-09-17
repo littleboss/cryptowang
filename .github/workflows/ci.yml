@@ -46,6 +46,7 @@ jobs:
           uv run --locked --no-dev python tools/okx_readonly_client.py --help
           uv run --locked --no-dev python strategies/paper_arb_scanner.py --help
           uv run --locked --no-dev python strategies/paper_combo_scanner.py --help
+          uv run --locked --no-dev python tools/cost_engine.py --help
 
       # Synthetic path only (no network). Day-1 must not be stuck at 0 fills.
       - name: Local paper grid — synthetic fills > 0, venue=local_paper
@@ -119,9 +120,51 @@ jobs:
           "
           uv run --locked --no-dev python tools/okx_readonly_client.py policy
 
+      # Cost Engine v0 (roadmap P0, Phase C paper/read-only): replay the JSON case fixture.
+      # Numbers must reproduce; the refusal cases (annualised gross, mark price as executable,
+      # buy-at-bid, one-sided book, calibrated claim without reference) must be refused.
+      # Everything offline, no keys; calibrated stays false; no tradable claim.
+      - name: Cost engine — fixture cases replay, observe_only, uncalibrated
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python tools/cost_engine.py --out /tmp/cost-cases.json --full
+          uv run --locked --no-dev python -c "
+          import json
+          rep = json.load(open('/tmp/cost-cases.json'))
+          assert rep['all_ok'] is True, [c['id'] for c in rep['cases'] if not c['ok']]
+          assert rep['action'] == 'observe_only' and rep['will_send_http'] is False
+          assert all(v is False for v in rep['trading_http'].values()), rep['trading_http']
+          assert rep['data_source']['http_fetch'] is False
+          assert rep['calibrated'] is False and rep['tradable_claim_allowed'] is False
+          refused = {c['id']: c['refused'] for c in rep['cases'] if c.get('refused')}
+          assert refused['refused_annualized_gross'] == 'NaiveAnnualizationRefused', refused
+          assert refused['refused_mark_price_as_executable'] == 'ExecutablePriceViolation', refused
+          assert refused['refused_calibrated_claim_without_ref'] == 'CalibrationClaimRefused', refused
+          core = ('fees', 'half_spread_slip', 'impact', 'borrow', 'transfer', 'capital_opp',
+                  'funding_uncertainty', 'hedge_rebalance')
+          for c in rep['cases']:
+              r = c.get('result')
+              if not r:
+                  continue
+              assert r['action'] == 'observe_only' and r['will_send_http'] is False, c['id']
+              assert r['annualized'] is False and r['edge_basis'] == 'hold_horizon', c['id']
+              assert r['tradable_claim_allowed'] is False, c['id']
+              assert all(k in r['components_bps'] for k in core), c['id']
+              assert abs(r['all_in_cost_bps'] - round(sum(r['components_bps'].values()), 4)) < 1e-6, c['id']
+              assert abs(r['net_edge_bps'] - round(r['gross_edge_bps'] - r['all_in_cost_bps'], 4)) < 1e-6, c['id']
+              be = r['breakeven_funding']
+              if be.get('rate_per_interval') is not None:
+                  assert abs(be['headroom_bps_per_interval'] * be['intervals'] - r['net_edge_bps']) < 1e-2, c['id']
+          a1 = next(c['result'] for c in rep['cases'] if c['id'] == 'a1_like_positive_carry_buckets')
+          print('cost_engine: %d/%d cases ok; a1 all_in=%.4f net=%.4f breakeven=%.6f/interval'
+                % (rep['cases_ok'], rep['cases_total'], a1['all_in_cost_bps'], a1['net_edge_bps'],
+                   a1['breakeven_funding_rate']))
+          "
+
       # Paper multi-leg arb scanner (Phase A) on the synthetic books fixture: offline, no keys.
       # Every record must be observe_only / will_send_http=false with bid/ask-only legs.
       # A synthetic "edge" in the fixture is a code-path check, not market evidence.
+      # The Cost Engine v0 block must reproduce costs_bps.total on every record (A1 with breakeven).
       - name: Paper arb scanner — fixture replay, observe_only, bid/ask only
         run: |
           set -euo pipefail
@@ -138,6 +181,12 @@ jobs:
               assert r['will_send_http'] is False, r['will_send_http']
               assert r['paper_fill']['order_sent'] is False
               assert 'total' in r['costs_bps'] and isinstance(r['risk_flags'], list)
+              ce = r['cost_engine']
+              assert ce['action'] == 'observe_only' and ce['will_send_http'] is False, ce
+              assert ce['calibrated'] is False and ce['tradable_claim_allowed'] is False, ce
+              assert abs(ce['all_in_cost_bps'] - r['costs_bps']['total']) < 1e-6, (ce['all_in_cost_bps'], r['costs_bps'])
+              assert abs(ce['net_edge_bps'] - r['net_edge_bps']) < 1e-6
+              assert (ce['breakeven_funding_rate'] is not None) == (r['family'] == 'A1_funding_carry'), r['family']
               for leg in r['legs']:
                   assert leg['price_type'] in ('bid', 'ask'), leg
                   assert leg['price_type'] == ('ask' if leg['side'] == 'buy' else 'bid'), leg
@@ -153,11 +202,14 @@ jobs:
           assert all(v is False for v in s['trading_http'].values()), s['trading_http']
           assert s['config']['safety_buffer']['calibrated'] is False
           assert s['config']['leverage_concept'] == 1
+          assert s['cost_engine']['enabled'] is True and s['cost_engine']['calibrated'] is False
+          assert s['cost_engine']['records'] == len(rows) and s['cost_engine']['records_with_breakeven'] == s['snapshots']
           assert set(s['hypotheses']) == {'H-A1', 'H-A2', 'H-A3'}, set(s['hypotheses'])
           assert s['data_source']['http_fetch'] is False
           print('paper_arb_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
                 {f: (v['records'], v['edge_exceeds_buffer'], v['passes_threshold'])
-                 for f, v in s['families'].items()})
+                 for f, v in s['families'].items()},
+                'cost_engine median breakeven bp/interval:', s['cost_engine']['median_breakeven_funding_bps_per_interval'])
           "
 
       # Paper combo scanner (Phase B) on the synthetic two-expiry fixture: offline, no keys.
@@ -192,6 +244,12 @@ jobs:
               assert 'relative_value_not_riskless' in r['risk_flags']
               assert 'vol_path_haircut' in r['costs_bps'] and 'total' in r['costs_bps']
               assert 'vol_path_haircut_bps' in r['safety_buffer']['components']
+              ce = r['cost_engine']
+              assert ce['action'] == 'observe_only' and ce['will_send_http'] is False, ce
+              assert ce['calibrated'] is False and ce['tradable_claim_allowed'] is False, ce
+              assert abs(ce['all_in_cost_bps'] - r['costs_bps']['total']) < 1e-6, (ce['all_in_cost_bps'], r['costs_bps'])
+              assert 'vol_path_haircut' in ce['components_bps'], ce['components_bps']
+              assert (ce['breakeven_funding_rate'] is not None) == (r['family'] == 'B1_covered_call_carry'), r['family']
               assert r['paper_delta_sim']['live_hedge_http'] is False and r['paper_delta_sim']['order_sent'] is False
               assert r['paper_fill']['order_sent'] is False
               assert r['leverage_concept'] == 1
@@ -215,6 +273,8 @@ jobs:
           assert s['config']['b2']['live_delta_hedge'] is False
           assert set(s['hypotheses']) == {'H-B1', 'H-B2', 'H-B3'}, set(s['hypotheses'])
           assert s['a1_reference_same_window']['records'] == s['snapshots']
+          assert s['cost_engine']['enabled'] is True and s['cost_engine']['calibrated'] is False
+          assert s['cost_engine']['records'] == len(rows)
           assert s['data_source']['http_fetch'] is False
           assert s['mainline_unchanged'] == 'spot_grid_local_paper'
           print('paper_combo_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),

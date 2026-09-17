@@ -1,0 +1,281 @@
+{
+  "note": "Cost Engine v0 fixture cases. Synthetic numbers (ETH-like books: spot 1999/2001, perp 2002/2003, funding 3.0bp now / 2.5bp next per 8h). Code-path checks for tools/cost_engine.py, not market evidence. observe_only; will_send_http=false; calibrated=false.",
+  "cases": [
+    {
+      "id": "a1_like_positive_carry_buckets",
+      "note": "Phase A A1 buckets (qty 1, H=3): fees 2x spot 10bp + 2x perp 5bp, exit half-spreads, 2bp hedge allowance, funding uncertainty 2bp x 3 + |3.0-2.5|bp x 3; gross = min(3.0, 2.5)bp x 3.",
+      "notional_quote": 2001.0,
+      "gross_quote": 1.50075,
+      "hold_years": 0.0027397260273972603,
+      "components_quote": {
+        "fees": 6.003,
+        "half_spread_slip": 1.5,
+        "impact": 0.0,
+        "hedge_rebalance": 0.4002,
+        "borrow": 0.0,
+        "transfer": 0.0,
+        "capital_opp": 0.0,
+        "funding_expected": 0.0,
+        "funding_uncertainty": 1.50075
+      },
+      "funding": {
+        "intervals": 3,
+        "interval_sec": 28800,
+        "funding_gross_quote": 1.50075,
+        "funding_cost_quote": 0.0,
+        "rate_used_per_interval": 0.00025
+      },
+      "expect": {
+        "gross_edge_bps": 7.5,
+        "all_in_cost_bps": 46.9963,
+        "net_edge_bps": -39.4963,
+        "components_bps.fees": 30.0,
+        "components_bps.half_spread_slip": 7.4963,
+        "components_bps.funding_uncertainty": 7.5,
+        "components_bps.hedge_rebalance": 2.0,
+        "breakeven_funding_rate": 0.0015665417,
+        "breakeven_funding.bps_per_interval": 15.6654,
+        "breakeven_funding.headroom_bps_per_interval": -13.1654,
+        "breakeven_funding.rate_implied_by_inputs_per_interval": 0.00025,
+        "calibrated": false,
+        "tradable_claim_allowed": false,
+        "annualized": false,
+        "edge_basis": "hold_horizon",
+        "action": "observe_only",
+        "will_send_http": false
+      }
+    },
+    {
+      "id": "a1_like_from_bid_ask_legs",
+      "note": "Same carry priced from bid/ask legs: buy spot @ask 2001, sell perp @bid 2002, 2 crossings each (entry + exit). Fees on each leg's own executable notional; one exit half-spread per leg; VWAP == top so impact 0.",
+      "notional_quote": 2001.0,
+      "gross_quote": 1.50075,
+      "legs": [
+        {"instrument": "ETH-USDT", "kind": "spot", "side": "buy", "qty": 1.0, "bid": 1999.0, "ask": 2001.0, "vwap": 2001.0, "mark_ref": 2000.0},
+        {"instrument": "ETH-USDT-SWAP", "kind": "perp", "side": "sell", "qty": 1.0, "bid": 2002.0, "ask": 2003.0, "vwap": 2002.0, "mark_ref": 2002.5}
+      ],
+      "other_components_quote": {
+        "hedge_rebalance": 0.4002,
+        "funding_uncertainty": 1.50075
+      },
+      "funding_leg": {"rate_now": 0.0003, "rate_next": 0.00025, "horizon_intervals": 3, "interval_sec": 28800, "receiver": "short_perp"},
+      "expect": {
+        "components_bps.fees": 30.005,
+        "components_bps.half_spread_slip": 7.4963,
+        "components_bps.impact": 0.0,
+        "all_in_cost_bps": 47.0013,
+        "net_edge_bps": -39.5013,
+        "hold_years": 0.00273973,
+        "breakeven_funding.rate_implied_by_inputs_per_interval": 0.00025,
+        "calibrated": false
+      }
+    },
+    {
+      "id": "impact_from_book_walk",
+      "note": "Thin book: buying 1.0 walks to VWAP 2001.6 vs top 2001 -> impact 0.6 quote = 2.9985 bps.",
+      "notional_quote": 2001.0,
+      "gross_quote": 0.0,
+      "legs": [
+        {"instrument": "ETH-USDT", "kind": "spot", "side": "buy", "qty": 1.0, "bid": 1999.0, "ask": 2001.0, "vwap": 2001.6, "crossings": 1}
+      ],
+      "expect": {
+        "components_bps.impact": 2.9985,
+        "components_bps.half_spread_slip": 0.0,
+        "components_bps.fees": 10.0,
+        "all_in_cost_bps": 12.9985,
+        "breakeven_funding_rate": null,
+        "breakeven_funding.reason": "no_funding_context"
+      }
+    },
+    {
+      "id": "pcp_like_identity_no_funding_thesis",
+      "note": "Phase A A2 conversion-like: spot entry fee 10bp, two option legs min(3bp notional, 12.5% premium) + 2bp settlement each; held to expiry (T=0.25y). Funding is not the thesis -> breakeven None.",
+      "notional_quote": 2001.0,
+      "gross_quote": 7.0,
+      "hold_years": 0.25,
+      "components_quote": {
+        "fees": 4.002,
+        "half_spread_slip": 0.0,
+        "impact": 0.0,
+        "borrow": 0.0,
+        "transfer": 0.0,
+        "capital_opp": 0.0,
+        "funding_expected": 0.0,
+        "funding_uncertainty": 0.0,
+        "hedge_rebalance": 0.0
+      },
+      "expect": {
+        "gross_edge_bps": 34.9825,
+        "components_bps.fees": 20.0,
+        "all_in_cost_bps": 20.0,
+        "net_edge_bps": 14.9825,
+        "breakeven_funding_rate": null,
+        "breakeven_funding.reason": "no_funding_context",
+        "hold_years": 0.25
+      }
+    },
+    {
+      "id": "option_legs_fee_cap_and_settlement",
+      "note": "Option legs held to expiry: buy put @ask 92, sell call @bid 100 (quote premium), crossings 1 + settlement. Fee per leg = min(2001 x 3bp = 0.6003, premium x 12.5%) + 2001 x 2bp = 1.0005. Plus spot buy @ask, 1 crossing.",
+      "notional_quote": 2001.0,
+      "gross_quote": 7.0,
+      "hold_years": 0.25,
+      "legs": [
+        {"instrument": "ETH-USDT", "kind": "spot", "side": "buy", "qty": 1.0, "bid": 1999.0, "ask": 2001.0, "crossings": 1},
+        {"instrument": "OPT-2000-P", "kind": "option", "side": "buy", "qty": 1.0, "bid": 90.0, "ask": 92.0, "crossings": 1, "settlement": true},
+        {"instrument": "OPT-2000-C", "kind": "option", "side": "sell", "qty": 1.0, "bid": 100.0, "ask": 102.0, "crossings": 1, "settlement": true}
+      ],
+      "expect": {
+        "components_bps.fees": 20.0,
+        "components_bps.half_spread_slip": 0.0,
+        "all_in_cost_bps": 20.0,
+        "net_edge_bps": 14.9825
+      }
+    },
+    {
+      "id": "borrow_capital_opp_transfer_buckets",
+      "note": "Short-spot direction: borrow 10% APR on 2001 for 1 day; capital_opp 5% on 2x notional for 1 day; transfer 1bp. Pure bucket arithmetic.",
+      "notional_quote": 2001.0,
+      "gross_quote": 0.0,
+      "hold_years": 0.0027397260273972603,
+      "components_quote": {
+        "fees": 0.0,
+        "half_spread_slip": 0.0,
+        "impact": 0.0,
+        "borrow": 0.5482191780821918,
+        "transfer": 0.2001,
+        "capital_opp": 0.5482191780821918,
+        "funding_uncertainty": 0.0,
+        "hedge_rebalance": 0.0
+      },
+      "expect": {
+        "components_bps.borrow": 2.7397,
+        "components_bps.capital_opp": 2.7397,
+        "components_bps.transfer": 1.0,
+        "all_in_cost_bps": 6.4794,
+        "net_edge_bps": -6.4794
+      }
+    },
+    {
+      "id": "funding_leg_predicted_sign_flip_zeroes_expectation",
+      "note": "Funding now +3bp, next -1bp: predicted flip -> used rate 0; breakeven still solvable (H=3), implied rate 0, headroom = -breakeven.",
+      "notional_quote": 2001.0,
+      "gross_quote": 0.0,
+      "components_quote": {"fees": 6.003},
+      "funding_leg": {"rate_now": 0.0003, "rate_next": -0.0001, "horizon_intervals": 3, "receiver": "short_perp"},
+      "expect": {
+        "breakeven_funding.rate_implied_by_inputs_per_interval": 0.0,
+        "breakeven_funding.bps_per_interval": 10.0,
+        "breakeven_funding.headroom_bps_per_interval": -10.0,
+        "net_edge_bps": -30.0
+      }
+    },
+    {
+      "id": "b1_like_negative_funding_paid_as_cost_with_extras",
+      "note": "Phase B B1-like with negative funding: funding paid 1.2006 sits in funding_expected (cost), vol_path_haircut 10bp carried as extra; premium edge 3.0 in gross. Implied received rate is negative.",
+      "notional_quote": 2001.0,
+      "gross_quote": 3.0,
+      "hold_years": 0.0027397260273972603,
+      "components_quote": {
+        "fees": 6.003,
+        "half_spread_slip": 1.5,
+        "impact": 0.0,
+        "borrow": 0.0,
+        "transfer": 0.0,
+        "capital_opp": 0.0,
+        "funding_expected": 1.2006,
+        "funding_uncertainty": 1.2006,
+        "hedge_rebalance": 0.0,
+        "vol_path_haircut": 2.001
+      },
+      "funding": {"intervals": 3, "funding_gross_quote": 0.0, "funding_cost_quote": 1.2006, "rate_used_per_interval": -0.0002},
+      "expect": {
+        "components_bps.vol_path_haircut": 10.0,
+        "components_bps.funding_expected": 6.0,
+        "all_in_cost_bps": 59.4963,
+        "net_edge_bps": -44.5038,
+        "breakeven_funding.rate_implied_by_inputs_per_interval": -0.0002,
+        "breakeven_funding.bps_per_interval": 12.8346,
+        "breakeven_funding.headroom_bps_per_interval": -14.8346
+      }
+    },
+    {
+      "id": "zero_horizon_no_breakeven",
+      "notional_quote": 2001.0,
+      "gross_quote": 0.0,
+      "components_quote": {"fees": 6.003},
+      "funding": {"intervals": 0},
+      "expect": {
+        "breakeven_funding_rate": null,
+        "breakeven_funding.reason": "zero_horizon_intervals",
+        "all_in_cost_bps": 30.0
+      }
+    },
+    {
+      "id": "calibrated_with_ref_still_no_tradable_claim",
+      "note": "calibrated=true is only accepted with a calibration_ref; even then tradable_claim_allowed stays false.",
+      "notional_quote": 2001.0,
+      "gross_quote": 0.0,
+      "calibrated": true,
+      "calibration_ref": "04-risk/example-cost-calibration-note (fixture placeholder)",
+      "components_quote": {"fees": 6.003},
+      "expect": {
+        "calibrated": true,
+        "tradable_claim_allowed": false,
+        "annualized": false
+      }
+    },
+    {
+      "id": "refused_annualized_gross",
+      "notional_quote": 2001.0,
+      "gross_quote": 219.1095,
+      "gross_basis": "annualized",
+      "components_quote": {"fees": 6.003},
+      "expect_error": "NaiveAnnualizationRefused"
+    },
+    {
+      "id": "refused_funding_leg_horizon_over_one_year",
+      "notional_quote": 2001.0,
+      "components_quote": {"fees": 6.003},
+      "funding_leg": {"rate_now": 0.0003, "horizon_intervals": 1096, "interval_sec": 28800},
+      "expect_error": "NaiveAnnualizationRefused"
+    },
+    {
+      "id": "refused_mark_price_as_executable",
+      "notional_quote": 2001.0,
+      "legs": [
+        {"instrument": "ETH-USDT", "kind": "spot", "side": "buy", "qty": 1.0, "bid": 1999.0, "ask": 2001.0, "price_type": "mark"}
+      ],
+      "expect_error": "ExecutablePriceViolation"
+    },
+    {
+      "id": "refused_buy_at_bid",
+      "notional_quote": 2001.0,
+      "legs": [
+        {"instrument": "ETH-USDT", "kind": "spot", "side": "buy", "qty": 1.0, "bid": 1999.0, "ask": 2001.0, "price_type": "bid"}
+      ],
+      "expect_error": "ExecutablePriceViolation"
+    },
+    {
+      "id": "refused_one_sided_book",
+      "notional_quote": 2001.0,
+      "legs": [
+        {"instrument": "OPT-2000-C", "kind": "option", "side": "sell", "qty": 1.0, "bid": null, "ask": 102.0, "crossings": 1}
+      ],
+      "expect_error": "ExecutablePriceViolation"
+    },
+    {
+      "id": "refused_calibrated_claim_without_ref",
+      "notional_quote": 2001.0,
+      "calibrated": true,
+      "components_quote": {"fees": 6.003},
+      "expect_error": "CalibrationClaimRefused"
+    },
+    {
+      "id": "refused_total_passed_as_component",
+      "notional_quote": 2001.0,
+      "components_quote": {"fees": 6.003, "total": 6.003},
+      "expect_error": "CostEngineError"
+    }
+  ]
+}

@@ -32,7 +32,11 @@ Hard gates (enforced in code, tested, not just documented):
     the simulated hedge cost goes into `costs_bps.hedge_rebalance`, never into "residual";
   * safety_buffer_bps is the sum of components (fee_roundtrip + slip + funding_uncert +
     vol_path_haircut + model_haircut), `calibrated: false` unless the caller says otherwise.
-    Nothing here is a return promise.
+    Nothing here is a return promise;
+  * optional `cost_engine` block (tools/cost_engine.py, Cost Engine v0): the same quote buckets
+    (incl. vol_path_haircut) re-summed by the shared engine — must reproduce costs_bps.total —
+    plus the breakeven per-interval funding rate for B1; calibrated=false, no annualised edge,
+    no tradable claim. `--no-cost-engine` omits it. costs_bps / passes_threshold are unchanged.
 
 The spot-grid / local_paper mainline is untouched: this module does not import or alter
 tools/local_paper_grid.py or strategies/grid_ab_compare.py.
@@ -55,6 +59,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "strategies"))
 
+import cost_engine as ce  # noqa: E402
 import okx_readonly_client as okx  # noqa: E402
 import paper_arb_scanner as pas  # noqa: E402
 from paper_arb_scanner import (  # noqa: E402
@@ -318,6 +323,8 @@ class ComboConfig:
     b3_rr_ref_fixed_volpts: float = 0.0
     b3_rr_ref_min_samples: int = 2
     b3_paper_delta: bool = False
+    # Cost Engine v0 cross-check block (tools/cost_engine.py); additive, see Phase A ScanConfig.
+    cost_engine: bool = True
     fees: FeeSchedule = field(default_factory=FeeSchedule)
     buffer: ComboSafetyBuffer = field(default_factory=ComboSafetyBuffer)
 
@@ -386,6 +393,13 @@ class ComboConfig:
                 "structure": "rr_with_wing_cover (naked RR is not built)",
             },
             "leverage_concept": 1,
+            "cost_engine": {
+                "enabled": self.cost_engine,
+                "engine": ce.ENGINE,
+                "version": ce.VERSION,
+                "calibrated": False,
+                "tradable_claim_allowed": False,
+            },
             "fees": self.fees.to_dict(),
             "safety_buffer": self.buffer.to_dict(),
         }
@@ -403,6 +417,7 @@ class ComboConfig:
             persistence_min_samples=self.persistence_min_samples,
             persistence_min_sec=self.persistence_min_sec,
             credit_favorable_basis=self.credit_favorable_basis,
+            cost_engine=self.cost_engine,
             fees=self.fees,
             buffer=pas.SafetyBuffer(
                 fee_roundtrip_bps=self.buffer.fee_roundtrip_bps,
@@ -712,6 +727,8 @@ def build_combo_record(
     tracker: PersistenceTracker,
     persistence_key: str,
     extra: dict,
+    funding_ctx: ce.FundingContext | None = None,
+    hold_years: float | None = None,
 ) -> dict:
     if family not in FAMILIES:
         raise ComboSchemaViolation(f"unknown Phase B family {family}")
@@ -726,6 +743,20 @@ def build_combo_record(
     costs_bps["total"] = round(sum(costs_bps[k] for k in COST_KEYS), 4)
     gross_bps = round(bps(gross_quote, notional_quote), 4)
     net_bps = round(gross_bps - costs_bps["total"], 4)
+    engine_block = (
+        pas.cost_engine_block(
+            gross_quote=gross_quote,
+            notional_quote=notional_quote,
+            costs_quote=costs_quote,
+            cost_keys=COST_KEYS,
+            costs_bps_total=costs_bps["total"],
+            net_bps=net_bps,
+            hold_years=hold_years,
+            funding_ctx=funding_ctx,
+        )
+        if cfg.cost_engine
+        else None
+    )
 
     buffer = cfg.buffer.resolve(costs_bps["fees"])
     flags = sorted(set(risk_flags) | set(liq_flags) | {"relative_value_not_riskless"})
@@ -780,6 +811,8 @@ def build_combo_record(
         "cross_checked_inbox": CROSS_CHECKED_INBOX,
         "related_phase_A": RELATED_PHASE_A,
     }
+    if engine_block is not None:
+        rec["cost_engine"] = engine_block
     rec.update(extra)
     if cfg.paper_fills:
         rec["paper_fill"] = pas.paper_fill(legs, books, notional_quote / cfg.qty, net_bps, cfg)
@@ -830,6 +863,16 @@ def finalize_combo_record(rec: dict) -> dict:
         raise ComboSchemaViolation("B2 must carry an enabled paper delta simulation")
     if rec["hedge_mode"] in (HEDGE_PAPER_DELTA, HEDGE_RR_PAPER_DELTA) and not sim.get("enabled"):
         raise ComboSchemaViolation(f"hedge_mode {rec['hedge_mode']} requires paper_delta_sim")
+    ceb = rec.get("cost_engine")
+    if ceb is not None:
+        if ceb.get("action") != ACTION or ceb.get("will_send_http") is not False:
+            raise ObserveOnlyViolation("refused: cost_engine block is not observe_only")
+        if ceb.get("tradable_claim_allowed") is not False or ceb.get("annualized") is not False:
+            raise ComboSchemaViolation("refused: cost_engine block claims tradable / annualised")
+        if abs(ceb["all_in_cost_bps"] - rec["costs_bps"]["total"]) > 1e-6:
+            raise ComboSchemaViolation("cost_engine.all_in_cost_bps must equal costs_bps.total")
+        if "vol_path_haircut" not in ceb["components_bps"]:
+            raise ComboSchemaViolation("cost_engine block must carry vol_path_haircut")
     text = json.dumps(rec, ensure_ascii=False).lower()
     for bad in FORBIDDEN_LABELS:
         if bad in text:
@@ -1136,6 +1179,14 @@ class ComboScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_B1}|{spot.inst_id}|{perp.inst_id}|{call.inst_id}",
             extra=extra,
+            funding_ctx=ce.FundingContext(
+                intervals=float(H),
+                interval_sec=fr.interval_sec,
+                funding_gross_quote=funding_q,
+                funding_cost_quote=funding_paid_q,
+                rate_used_per_interval=f_used if positive else -abs(f_now),
+            ),
+            hold_years=hold["hold_years"],
         )
         if a1_ref is not None:
             rec["b1_minus_a1_net_edge_bps"] = round(rec["net_edge_bps"] - a1_ref["net_edge_bps"], 4)
@@ -1332,6 +1383,8 @@ class ComboScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_B2}|{near.inst_id}|{far.inst_id}",
             extra=extra,
+            # vol thesis: funding enters only via the paper hedge → no breakeven funding rate
+            hold_years=hold["hold_years"],
         )
 
     # ---- B3 25Δ risk-reversal with wing cover (options_rr_static / + paper delta)
@@ -1593,6 +1646,7 @@ class ComboScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_B3}|{expiry_ms}|{direction}|{call25.strike}|{put25.strike}|{wing.strike}",
             extra=extra,
+            hold_years=hold["hold_years"],
         )
 
 
@@ -1677,6 +1731,9 @@ def summarize(
         "hypotheses": hyp,
         "a1_reference_same_window": a1_block,
         "skipped": dict(sorted((skipped or Counter()).items())),
+        "cost_engine": ce.summarize_blocks(
+            [r["cost_engine"] for r in records if "cost_engine" in r], enabled=cfg.cost_engine
+        ),
         "config": cfg.to_dict(),
         "data_source": source,
         "policy": okx.POLICY,
@@ -1780,6 +1837,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--paper-fills", action="store_true")
     p.add_argument("--paper-extra-slip-bps", type=float, default=5.0)
+    p.add_argument(
+        "--no-cost-engine",
+        action="store_true",
+        help="omit the Cost Engine v0 cross-check block (cost_engine) from records / summary",
+    )
 
     p.add_argument("--out", default="", help="JSONL records file (default stdout)")
     p.add_argument("--summary-out", default="", help="summary JSON file")
@@ -1821,6 +1883,7 @@ def config_from_args(args: argparse.Namespace) -> ComboConfig:
         b3_rr_ref_fixed_volpts=args.b3_rr_ref_fixed_volpts,
         b3_rr_ref_min_samples=args.b3_rr_ref_min_samples,
         b3_paper_delta=args.b3_paper_delta,
+        cost_engine=not args.no_cost_engine,
         fees=FeeSchedule(
             spot_taker_bps=args.fee_spot_bps,
             perp_taker_bps=args.fee_perp_bps,
