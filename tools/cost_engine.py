@@ -20,7 +20,7 @@ it returns
 
 Hard gates (enforced in code, tested, not just documented):
   * every result carries action == "observe_only", will_send_http == False; the module has
-    no network code path (no urlopen, no trade / amend / execution);
+    no network code path at all (no HTTP client, no trade / amend / execution);
   * executable prices are bid/ask only: a LegSpec whose price_type is mark / mid / last, or
     whose side/price_type convention is wrong (buy must hit the ask, sell the bid), is refused;
     a mark price can only travel as `mark_ref`; a one-sided book is skipped, never guessed;
