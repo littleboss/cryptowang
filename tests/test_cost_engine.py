@@ -49,7 +49,9 @@ def spot_perp(spot_bid=1999.0, spot_ask=2001.0, perp_bid=2002.0, perp_ask=2003.0
     def book(inst, kind, bid, ask, size, **kw):
         bids = tuple(pas.Level(bid - i, size) for i in range(3))
         asks = tuple(pas.Level(ask + i, size) for i in range(3))
-        return pas.Book(inst_id=inst, kind=kind, bids=bids, asks=asks, ts_ms=1_789_573_200_000, **kw)
+        return pas.Book(
+            inst_id=inst, kind=kind, bids=bids, asks=asks, ts_ms=1_789_573_200_000, **kw
+        )
 
     return (
         book("ETH-USDT", "spot", spot_bid, spot_ask, sz),
@@ -60,7 +62,9 @@ def spot_perp(spot_bid=1999.0, spot_ask=2001.0, perp_bid=2002.0, perp_ask=2003.0
 def a1_record(cost_engine=True, **funding_kw) -> dict:
     s, p = spot_perp()
     fr = pas.Funding(**{"rate": 0.0003, "next_rate": 0.00025, "interval_sec": H8, **funding_kw})
-    cfg = pas.ScanConfig(persistence_min_samples=1, persistence_min_sec=0.0, cost_engine=cost_engine)
+    cfg = pas.ScanConfig(
+        persistence_min_samples=1, persistence_min_sec=0.0, cost_engine=cost_engine
+    )
     snap = pas.Snapshot(ts_ms=1_789_573_200_000, venue="okx", spot=s, perp=p, funding=fr)
     return pas.ArbScanner(cfg).scan_a1(snap)[0]
 
@@ -222,7 +226,7 @@ class ComponentPrimitiveTest(unittest.TestCase):
     def test_fee_quote_spot_perp_option_cap_settlement(self):
         self.assertAlmostEqual(ce.fee_quote("spot", N, self.fees), N * 10 / 1e4)
         self.assertAlmostEqual(ce.fee_quote("perp", N, self.fees, crossings=2), N * 5 / 1e4 * 2)
-        # option: min(3 bp of underlying notional = 0.6003, 12.5% of premium 92 = 11.5) + 2 bp settle
+        # option: min(3 bp of underlying notional = 0.6003, 12.5% × premium 92 = 11.5) + 2 bp settle
         self.assertAlmostEqual(
             ce.fee_quote("option", N, self.fees, premium_quote=92.0, settlement=True),
             0.6003 + 0.4002,
@@ -257,7 +261,8 @@ class ComponentPrimitiveTest(unittest.TestCase):
         self.assertAlmostEqual(ce.capital_opp_quote(2 * N, 0.05, HOLD_1D), 2 * N * 0.05 * HOLD_1D)
         self.assertEqual(ce.capital_opp_quote(2 * N, 0.0, HOLD_1D), 0.0)  # no claim by default
         self.assertAlmostEqual(
-            ce.funding_uncertainty_quote(N, 2.0, 3, pred_gap_rate=0.00005), A1_BUCKETS["funding_uncertainty"]
+            ce.funding_uncertainty_quote(N, 2.0, 3, pred_gap_rate=0.00005),
+            A1_BUCKETS["funding_uncertainty"],
         )
         self.assertAlmostEqual(ce.hedge_rebalance_quote(N, 2.0), 0.4002)
         for bad in (
@@ -329,7 +334,10 @@ class EvaluateTest(unittest.TestCase):
             components_quote=A1_BUCKETS,
             hold_years=HOLD_1D,
             funding=ce.FundingContext(
-                intervals=3, interval_sec=H8, funding_gross_quote=A1_GROSS, rate_used_per_interval=0.00025
+                intervals=3,
+                interval_sec=H8,
+                funding_gross_quote=A1_GROSS,
+                rate_used_per_interval=0.00025,
             ),
         )
         base.update(kw)
@@ -355,7 +363,9 @@ class EvaluateTest(unittest.TestCase):
         r = self.a1()
         be = r.breakeven_funding
         # f* = other costs / (H × N): all costs here (basis not credited, no funding cost)
-        self.assertAlmostEqual(be["rate_per_interval"], sum(A1_BUCKETS.values()) / (3 * N), places=9)
+        self.assertAlmostEqual(
+            be["rate_per_interval"], sum(A1_BUCKETS.values()) / (3 * N), places=9
+        )
         self.assertAlmostEqual(be["bps_per_interval"], 15.6654)
         self.assertAlmostEqual(be["rate_implied_by_inputs_per_interval"], 0.00025)
         self.assertEqual(be["rate_used_per_interval"], 0.00025)
@@ -391,7 +401,10 @@ class EvaluateTest(unittest.TestCase):
             notional_quote=N,
             components_quote=comps,
             funding=ce.FundingContext(
-                intervals=3, funding_gross_quote=0.0, funding_cost_quote=1.2006, rate_used_per_interval=-0.0002
+                intervals=3,
+                funding_gross_quote=0.0,
+                funding_cost_quote=1.2006,
+                rate_used_per_interval=-0.0002,
             ),
         )
         be = r.breakeven_funding
@@ -404,12 +417,17 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(r.flags, [])  # vol_path_haircut is a known extra
 
     def test_no_funding_context_or_zero_horizon_gives_none_with_reason(self):
-        r = ce.evaluate(gross_quote=7.0, notional_quote=N, components_quote=A1_BUCKETS, hold_years=0.25)
+        r = ce.evaluate(
+            gross_quote=7.0, notional_quote=N, components_quote=A1_BUCKETS, hold_years=0.25
+        )
         self.assertIsNone(r.breakeven_funding_rate)
         self.assertEqual(r.breakeven_funding["reason"], "no_funding_context")
         self.assertEqual(r.hold_years, 0.25)
         r0 = ce.evaluate(
-            gross_quote=0.0, notional_quote=N, components_quote=A1_BUCKETS, funding=ce.FundingContext(intervals=0)
+            gross_quote=0.0,
+            notional_quote=N,
+            components_quote=A1_BUCKETS,
+            funding=ce.FundingContext(intervals=0),
         )
         self.assertEqual(r0.breakeven_funding["reason"], "zero_horizon_intervals")
         self.assertIsNone(r0.hold_years)
@@ -472,7 +490,10 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(fl5.used_rate_per_interval(), (0.0, []))
 
     def test_summarize_blocks(self):
-        blocks = [self.a1().to_dict(), ce.evaluate(gross_quote=7.0, notional_quote=N, components_quote=A1_BUCKETS).to_dict()]
+        blocks = [
+            self.a1().to_dict(),
+            ce.evaluate(gross_quote=7.0, notional_quote=N, components_quote=A1_BUCKETS).to_dict(),
+        ]
         s = ce.summarize_blocks(blocks)
         self.assertEqual((s["records"], s["records_with_breakeven"]), (2, 1))
         self.assertAlmostEqual(s["median_breakeven_funding_bps_per_interval"], 15.6654)
@@ -528,16 +549,31 @@ class FixtureCasesTest(unittest.TestCase):
 
     def test_case_mismatch_and_unexpected_result_are_reported(self):
         bad = ce.run_case(
-            {"id": "x", "notional_quote": N, "components_quote": {"fees": 6.003}, "expect": {"all_in_cost_bps": 31.0}}
+            {
+                "id": "x",
+                "notional_quote": N,
+                "components_quote": {"fees": 6.003},
+                "expect": {"all_in_cost_bps": 31.0},
+            }
         )
         self.assertFalse(bad["ok"])
         self.assertEqual(bad["diffs"]["all_in_cost_bps"], {"expect": 31.0, "got": 30.0})
         surprise = ce.run_case(
-            {"id": "y", "notional_quote": N, "components_quote": {}, "expect_error": "CostEngineError"}
+            {
+                "id": "y",
+                "notional_quote": N,
+                "components_quote": {},
+                "expect_error": "CostEngineError",
+            }
         )
         self.assertFalse(surprise["ok"])
         wrong_kind = ce.run_case(
-            {"id": "z", "notional_quote": 0.0, "components_quote": {}, "expect_error": "NaiveAnnualizationRefused"}
+            {
+                "id": "z",
+                "notional_quote": 0.0,
+                "components_quote": {},
+                "expect_error": "NaiveAnnualizationRefused",
+            }
         )
         self.assertFalse(wrong_kind["ok"])
         self.assertEqual(wrong_kind["refused"], "CostEngineError")
@@ -559,7 +595,11 @@ class FixtureCasesTest(unittest.TestCase):
             self.assertIs(rep["all_ok"], True)
             self.assertTrue(all("result" in c or c.get("refused") for c in rep["cases"]))
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT)], capture_output=True, text=True, cwd=ROOT, env={"PATH": "/usr/bin:/bin"}
+            [sys.executable, str(SCRIPT)],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env={"PATH": "/usr/bin:/bin"},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rep = json.loads(proc.stdout)
@@ -570,7 +610,16 @@ class FixtureCasesTest(unittest.TestCase):
             cases = Path(d) / "bad.json"
             cases.write_text(
                 json.dumps(
-                    {"cases": [{"id": "bad", "notional_quote": N, "components_quote": {"fees": 6.003}, "expect": {"all_in_cost_bps": 1.0}}]}
+                    {
+                        "cases": [
+                            {
+                                "id": "bad",
+                                "notional_quote": N,
+                                "components_quote": {"fees": 6.003},
+                                "expect": {"all_in_cost_bps": 1.0},
+                            }
+                        ]
+                    }
                 ),
                 encoding="utf-8",
             )
@@ -583,7 +632,9 @@ class FixtureCasesTest(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 1)
             self.assertIn("0/1 cases ok", proc.stderr)
-        proc = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True)
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("observe_only", proc.stdout)
         self.assertIn("calibrated=false", proc.stdout)
@@ -627,13 +678,21 @@ class PhaseAWiringTest(unittest.TestCase):
         self.assertAlmostEqual(be["headroom_bps_per_interval"] * 3, rec["net_edge_bps"], places=3)
         flip = a1_record(rate=0.0003, next_rate=-0.0001)
         self.assertIn("funding_sign_flip_predicted", flip["risk_flags"])
-        self.assertEqual(flip["cost_engine"]["breakeven_funding"]["rate_implied_by_inputs_per_interval"], 0.0)
+        self.assertEqual(
+            flip["cost_engine"]["breakeven_funding"]["rate_implied_by_inputs_per_interval"], 0.0
+        )
 
     def test_no_cost_engine_flag_removes_block_only(self):
         on, off = a1_record(True), a1_record(False)
         self.assertIn("cost_engine", on)
         self.assertNotIn("cost_engine", off)
-        for k in ("costs_bps", "net_edge_bps", "gross_edge_bps", "safety_buffer_bps", "passes_threshold"):
+        for k in (
+            "costs_bps",
+            "net_edge_bps",
+            "gross_edge_bps",
+            "safety_buffer_bps",
+            "passes_threshold",
+        ):
             self.assertEqual(on[k], off[k], k)
 
     def test_finalize_refuses_tampered_block(self):
@@ -648,7 +707,9 @@ class PhaseAWiringTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             pas.finalize_record({**rec, "cost_engine": {**blk, "annualized": True}})
         with self.assertRaises(ValueError):
-            pas.finalize_record({**rec, "cost_engine": {**blk, "all_in_cost_bps": blk["all_in_cost_bps"] + 1}})
+            pas.finalize_record(
+                {**rec, "cost_engine": {**blk, "all_in_cost_bps": blk["all_in_cost_bps"] + 1}}
+            )
         with self.assertRaises(ValueError):
             pas.cost_engine_block(
                 gross_quote=A1_GROSS,
@@ -681,7 +742,9 @@ class PhaseAWiringTest(unittest.TestCase):
         s = pas.summarize(records, len(snaps), pas.ScanConfig(), snaps[0].source)
         self.assertIs(s["cost_engine"]["enabled"], True)
         self.assertEqual(s["cost_engine"]["records"], len(records))
-        self.assertEqual(s["cost_engine"]["records_with_breakeven"], len(snaps))  # one A1 per snapshot
+        self.assertEqual(
+            s["cost_engine"]["records_with_breakeven"], len(snaps)
+        )  # one A1 per snapshot
         self.assertIs(s["cost_engine"]["calibrated"], False)
         self.assertIs(s["config"]["cost_engine"]["enabled"], True)
         self.assertIs(s["config"]["cost_engine"]["calibrated"], False)
@@ -691,7 +754,12 @@ class PhaseAWiringTest(unittest.TestCase):
 
     def test_cli_no_cost_engine(self):
         proc = subprocess.run(
-            [sys.executable, str(ROOT / "strategies" / "paper_arb_scanner.py"), "--no-cost-engine", "--print-summary"],
+            [
+                sys.executable,
+                str(ROOT / "strategies" / "paper_arb_scanner.py"),
+                "--no-cost-engine",
+                "--print-summary",
+            ],
             capture_output=True,
             text=True,
             cwd=ROOT,
@@ -765,10 +833,17 @@ class PhaseBWiringTest(unittest.TestCase):
         with self.assertRaises(pas.ObserveOnlyViolation):
             pcs.finalize_combo_record({**rec, "cost_engine": {**blk, "will_send_http": True}})
         with self.assertRaises(pcs.ComboSchemaViolation):
-            pcs.finalize_combo_record({**rec, "cost_engine": {**blk, "tradable_claim_allowed": True}})
+            pcs.finalize_combo_record(
+                {**rec, "cost_engine": {**blk, "tradable_claim_allowed": True}}
+            )
         with self.assertRaises(pcs.ComboSchemaViolation):
             pcs.finalize_combo_record({**rec, "cost_engine": {**blk, "all_in_cost_bps": 0.0}})
-        no_vph = {**blk, "components_bps": {k: v for k, v in blk["components_bps"].items() if k != "vol_path_haircut"}}
+        no_vph = {
+            **blk,
+            "components_bps": {
+                k: v for k, v in blk["components_bps"].items() if k != "vol_path_haircut"
+            },
+        }
         with self.assertRaises(pcs.ComboSchemaViolation):
             pcs.finalize_combo_record({**rec, "cost_engine": no_vph})
 

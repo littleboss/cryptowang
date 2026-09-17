@@ -1383,7 +1383,8 @@ class ComboScanner:
             tracker=self.tracker,
             persistence_key=f"{FAMILY_B2}|{near.inst_id}|{far.inst_id}",
             extra=extra,
-            hold_years=hold["hold_years"],  # vol thesis: funding only via the paper hedge → no breakeven
+            # vol thesis: funding enters only via the paper hedge → no breakeven funding rate
+            hold_years=hold["hold_years"],
         )
 
     # ---- B3 25Δ risk-reversal with wing cover (options_rr_static / + paper delta)
