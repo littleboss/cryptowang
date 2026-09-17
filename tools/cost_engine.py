@@ -277,6 +277,10 @@ class LegSpec:
     (2 = entry + exit; 1 = entry only, e.g. an option held to expiry with `settlement=True`).
     `vwap` is the book-walk VWAP for `qty` (None → impact not measured → 0).
     `quote_conv` converts price units to quote currency (coin-priced premium × spot bid/ask).
+    `slip_crossings` — additional half-spread crossings charged to `half_spread_slip`
+    *independently of the fee crossings*. None (default) keeps the Phase A/B convention
+    `crossings − 1`. A single-pass multi-leg spot cycle (T1 triangle) uses `crossings=1`
+    (one fee per leg) with `slip_crossings=1` as an explicit non-atomic re-quote haircut.
     """
 
     instrument: str
@@ -291,6 +295,7 @@ class LegSpec:
     crossings: int = 2
     settlement: bool = False
     mark_ref: float | None = None
+    slip_crossings: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in INSTRUMENT_KINDS:
@@ -313,6 +318,8 @@ class LegSpec:
         _require_pos("quote_conv", self.quote_conv)
         if self.crossings < 1:
             raise CostEngineError("crossings must be >= 1 (the entry always crosses)")
+        if self.slip_crossings is not None and self.slip_crossings < 0:
+            raise CostEngineError("slip_crossings must be >= 0")
         px = self.executable_price
         if px is None:
             raise ExecutablePriceViolation(
@@ -328,6 +335,11 @@ class LegSpec:
     @property
     def two_sided(self) -> bool:
         return self.bid is not None and self.ask is not None
+
+    @property
+    def spread_crossings(self) -> int:
+        """Half-spread crossings charged to `half_spread_slip` (entry spread excluded)."""
+        return self.slip_crossings if self.slip_crossings is not None else self.crossings - 1
 
     def exec_quote(self) -> float:
         """Executable value of the leg in quote currency (price × qty × quote_conv)."""
@@ -348,6 +360,7 @@ class LegSpec:
             "crossings": self.crossings,
             "settlement": self.settlement,
             "mark_ref": self.mark_ref,
+            "slip_crossings": self.slip_crossings,
         }
 
     @classmethod
@@ -365,6 +378,9 @@ class LegSpec:
             crossings=int(d.get("crossings", 2)),
             settlement=bool(d.get("settlement", False)),
             mark_ref=float(d["mark_ref"]) if d.get("mark_ref") is not None else None,
+            slip_crossings=(
+                int(d["slip_crossings"]) if d.get("slip_crossings") is not None else None
+            ),
         )
 
 
@@ -375,8 +391,8 @@ def leg_costs(
 
     * fees: spot / perp on their own executable notional per crossing; options on the
       *underlying* notional with the premium cap, plus settlement if held to expiry;
-    * half_spread_slip: (crossings − 1) additional half-spreads per leg — the entry spread is
-      already embedded in the bid/ask executable price;
+    * half_spread_slip: `spread_crossings` additional half-spreads per leg (default
+      crossings − 1) — the entry spread is already embedded in the bid/ask executable price;
     * impact: |VWAP − top| × qty per leg (entry only; None VWAP → 0).
     """
     _require_pos("underlying_notional_quote", underlying_notional_quote)
@@ -395,9 +411,9 @@ def leg_costs(
             )
         else:
             fees_q += fee_quote(leg.kind, leg.exec_quote(), fees, crossings=leg.crossings)
-        if leg.crossings > 1:
+        if leg.spread_crossings > 0:
             spread_q += half_spread_quote(
-                leg.bid, leg.ask, leg.qty, crossings=leg.crossings - 1, quote_conv=leg.quote_conv
+                leg.bid, leg.ask, leg.qty, crossings=leg.spread_crossings, quote_conv=leg.quote_conv
             )
         impact_q += impact_quote(
             float(leg.executable_price), leg.vwap, leg.qty, quote_conv=leg.quote_conv
