@@ -45,6 +45,7 @@ jobs:
           uv run --locked --no-dev python strategies/grid_ab_compare.py --help
           uv run --locked --no-dev python tools/okx_readonly_client.py --help
           uv run --locked --no-dev python strategies/paper_arb_scanner.py --help
+          uv run --locked --no-dev python strategies/paper_combo_scanner.py --help
 
       # Synthetic path only (no network). Day-1 must not be stuck at 0 fills.
       - name: Local paper grid — synthetic fills > 0, venue=local_paper
@@ -155,6 +156,68 @@ jobs:
           assert set(s['hypotheses']) == {'H-A1', 'H-A2', 'H-A3'}, set(s['hypotheses'])
           assert s['data_source']['http_fetch'] is False
           print('paper_arb_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
+                {f: (v['records'], v['edge_exceeds_buffer'], v['passes_threshold'])
+                 for f, v in s['families'].items()})
+          "
+
+      # Paper combo scanner (Phase B) on the synthetic two-expiry fixture: offline, no keys.
+      # Every record must be observe_only / will_send_http=false / phase=B / relative_value with
+      # combo_id + hedge_mode + residual_risks, bid/ask-only legs, covered short options and a
+      # paper-only delta simulation (live_hedge_http=false). Fixture dislocations are synthetic
+      # code-path checks, not market evidence.
+      - name: Paper combo scanner — fixture replay, observe_only, relative_value, no live hedge
+        run: |
+          set -euo pipefail
+          uv run --locked --no-dev python strategies/paper_combo_scanner.py --source fixture \
+            --paper-fills --out /tmp/combo.jsonl --summary-out /tmp/combo-summary.json --quiet
+          uv run --locked --no-dev python -c "
+          import json
+          rows = [json.loads(l) for l in open('/tmp/combo.jsonl') if l.strip()]
+          s = json.load(open('/tmp/combo-summary.json'))
+          assert rows, 'no records'
+          need_rr = {'B1_covered_call_carry': {'gamma', 'funding_flip', 'gap', 'margin', 'basis', 'capped_upside'},
+                     'B2_calendar_vol': {'gamma', 'vega_term_structure', 'gap', 'margin',
+                                         'hedge_slippage_underestimation', 'model_risk'},
+                     'B3_put_skew_rr': {'skew_trend', 'gamma', 'gap', 'margin', 'spot_direction_bleed', 'liquidity'}}
+          modes = {'B1_covered_call_carry': {'static_combo'}, 'B2_calendar_vol': {'paper_delta_sim_only'},
+                   'B3_put_skew_rr': {'options_rr_static', 'options_rr_plus_paper_delta'}}
+          fams = set()
+          for r in rows:
+              assert r['action'] == 'observe_only', r['action']
+              assert r['will_send_http'] is False, r['will_send_http']
+              assert r['phase'] == 'B' and r['taxonomy'] == 'relative_value', (r['phase'], r['taxonomy'])
+              assert r['combo_id'] == r['family'][:2], (r['combo_id'], r['family'])
+              assert r['hedge_mode'] in modes[r['family']], r['hedge_mode']
+              assert need_rr[r['family']] <= set(r['residual_risks']), r['residual_risks']
+              assert 'relative_value_not_riskless' in r['risk_flags']
+              assert 'vol_path_haircut' in r['costs_bps'] and 'total' in r['costs_bps']
+              assert 'vol_path_haircut_bps' in r['safety_buffer']['components']
+              assert r['paper_delta_sim']['live_hedge_http'] is False and r['paper_delta_sim']['order_sent'] is False
+              assert r['paper_fill']['order_sent'] is False
+              assert r['leverage_concept'] == 1
+              for leg in r['legs']:
+                  assert leg['price_type'] in ('bid', 'ask'), leg
+                  assert leg['price_type'] == ('ask' if leg['side'] == 'buy' else 'bid'), leg
+              shorts = [l for l in r['legs'] if l['role'] in ('call', 'put') and l['side'] == 'sell']
+              assert len(r['cover']) == len(shorts), 'every short option must have a cover entry'
+              if r['family'] == 'B2_calendar_vol':
+                  assert r['paper_delta_sim']['enabled'] is True
+              text = json.dumps(r, ensure_ascii=False).lower()
+              for bad in ('risk_free', '无风险', '稳赚', 'guaranteed'):
+                  assert bad not in text, bad
+              fams.add(r['family'])
+          assert fams == {'B1_covered_call_carry', 'B2_calendar_vol', 'B3_put_skew_rr'}, fams
+          assert s['action'] == 'observe_only' and s['will_send_http'] is False and s['phase'] == 'B'
+          assert s['live_delta_hedge'] is False
+          assert all(v is False for v in s['trading_http'].values()), s['trading_http']
+          assert s['config']['safety_buffer']['calibrated'] is False
+          assert s['config']['leverage_concept'] == 1
+          assert s['config']['b2']['live_delta_hedge'] is False
+          assert set(s['hypotheses']) == {'H-B1', 'H-B2', 'H-B3'}, set(s['hypotheses'])
+          assert s['a1_reference_same_window']['records'] == s['snapshots']
+          assert s['data_source']['http_fetch'] is False
+          assert s['mainline_unchanged'] == 'spot_grid_local_paper'
+          print('paper_combo_scanner: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
                 {f: (v['records'], v['edge_exceeds_buffer'], v['passes_threshold'])
                  for f, v in s['families'].items()})
           "

@@ -11,10 +11,10 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 | 路径 | 内容 |
 |------|------|
 | `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（仅打包，无交易依赖） |
-| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）** |
+| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）** |
 | `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（公共行情 / 盘口 / funding GET；可选 `OKX_SIMULATED=1` 只读状态） |
 | `fixtures/proposals/` | 提案 JSON（v3：基线 vs B1），供策略模块 / CI 离线消费；无密钥 |
-| `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器离线回放 / CI；**非行情证据** |
+| `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器 / 组合评分离线回放 / CI；Phase B 用双到期版本；**非行情证据** |
 | `tests/` | 标准库 `unittest` 冒烟 / 单测（合成路径必须出成交；只读客户端用本地假服务器，不出网） |
 | `notes/` | 筛选结论、Freqtrade 对照、v2 旁路笔记 |
 | `backtests/` | 预留：回测脚本与费用后报告（本 PR 未加） |
@@ -36,6 +36,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 - 提案 v3（[fixtures/proposals](fixtures/proposals/)）：**立刻不改参**（保持 2200–3200 / 30 / SL 2150 / 1x）；纸面实验臂 **B1**（maxPx 2700、gridNum 20）风控**附条件允许**，只在 `local_paper` 对照跑，用 `strategies/grid_ab_compare.py`；采纳须另行确认。加仓 / 加杠杆已否决（H-C）。
 - 只读 OKX 客户端已入库（公共行情 GET；可选 `OKX_SIMULATED=1` 只读状态）。**没有** Trade / amend / withdraw 代码。
 - 纸面多腿套利扫描器 Phase A（`strategies/paper_arb_scanner.py`）已入库：**研究侧支，只读 / observe_only**，不替换网格主线；风控附条件通过（见 §8），live execution **不在**批准范围。
+- 纸面对冲组合评分 Phase B（`strategies/paper_combo_scanner.py`，B1 备兑 carry / B2 日历 vol / B3 带翼 25Δ RR）已入库：**研究侧支，只读 / observe_only / 全部 `relative_value`**，与 A 扫描器并列，不并入网格；风控附条件通过「只读指标 + 纸面成交」（见 §9），B2 delta 对冲**仅纸面模拟**，live 不在范围。Phase A 首扫净边全负 → B 是「显式 RV 组合研究」，不是「找回边」。
 - 本仓只入库纸面工具；**push ≠ 实盘**。
 
 ## 包装说明（仅工程，不是实盘）
@@ -271,7 +272,7 @@ uv run python tools/okx_readonly_client.py private-status --algo-id <demoAlgoId>
 uv run --no-dev python -m unittest discover -s tests -v
 ```
 
-覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘；策略模块的提案加载 / 三道拒绝（`will_send_http=true`、`lever=2`、加仓臂）、两臂同路径出成交、必填输出字段、deltas 一致性、H-A 7 日连败 / 重置、H-B 2pct MDD 边界、Day-1 库存风险规则、import 与 subprocess 引擎一致、CLI 落 JSON + markdown；只读客户端的 GET-only 闸门、trade/amend/withdraw 路径拒绝、live key 拒绝、`repr` 不泄露、HMAC 签名向量、假服务器上的 ticker / 分页 candles / 签名 GET 头、无密钥 stub；套利扫描器的硬门禁（mark/mid/last 作可执行价 → 拒绝；`action≠observe_only` / `will_send_http=true` → 拒绝；A1 非 `relative_value` → 拒绝；裸卖期权 → 拒绝；源码无 `/api/v5/trade` / `urlopen`）、A1 / A2 / A3 手算数字（funding × H、PCP conversion / reversal、box 权利金与隐含利率）、币本位权利金保守折算、perp 代理降级标注 + funding 计入成本、持续度连续样本 / 时长 / 重置、薄簿 `illiquid` / `insufficient_depth` / impact、safety_buffer = 分量之和、paper fill 块、fixture 回放全字段 + 卖箱永不 pass、CLI JSONL / summary、假 OKX 公共源（张数 × `ctVal`、行权价挑选、全部 GET）。全部离线（客户端 / 扫描器测试用本机 `http.server` 假 OKX）。
+覆盖：算术格线、费用 worst-case、合成路径必有成交、`total − fees == fee_after` 恒等式、单格往返利润、SL 清仓停机、区间外等待、schema 字段齐全、CSV 往返、CLI 落盘；策略模块的提案加载 / 三道拒绝（`will_send_http=true`、`lever=2`、加仓臂）、两臂同路径出成交、必填输出字段、deltas 一致性、H-A 7 日连败 / 重置、H-B 2pct MDD 边界、Day-1 库存风险规则、import 与 subprocess 引擎一致、CLI 落 JSON + markdown；只读客户端的 GET-only 闸门、trade/amend/withdraw 路径拒绝、live key 拒绝、`repr` 不泄露、HMAC 签名向量、假服务器上的 ticker / 分页 candles / 签名 GET 头、无密钥 stub；套利扫描器的硬门禁（mark/mid/last 作可执行价 → 拒绝；`action≠observe_only` / `will_send_http=true` → 拒绝；A1 非 `relative_value` → 拒绝；裸卖期权 → 拒绝；源码无 `/api/v5/trade` / `urlopen`）、A1 / A2 / A3 手算数字（funding × H、PCP conversion / reversal、box 权利金与隐含利率）、币本位权利金保守折算、perp 代理降级标注 + funding 计入成本、持续度连续样本 / 时长 / 重置、薄簿 `illiquid` / `insufficient_depth` / impact、safety_buffer = 分量之和、paper fill 块、fixture 回放全字段 + 卖箱永不 pass、CLI JSONL / summary、假 OKX 公共源（张数 × `ctVal`、行权价挑选、全部 GET）；Phase B 组合评分的硬门禁（`phase≠B` / `taxonomy≠relative_value` / `combo_id` 不匹配 / `hedge_mode` 越权 / 残留风险缺项 / 含 `risk_free`、`无风险`、`稳赚`、`guaranteed` 字样 / `live_hedge_http=true` / 裸卖 → 全部拒绝）、备兑规则（B1 短 call 须由 **spot** 名义覆盖、反向日历拒绝、无翼 RR 拒绝且不建记录）、Black-76 平价 / delta / 隐含波动率往返、B1 / B2 / B3 手算数字（备兑权利金边 = bid − ATM 参照公平价、funding × H、日历可执行价差 vs 平坦期限参照、RR 可执行偏离 × vega）、B1 负 funding 记成本 / 预测翻号失效、Δ 带 → moneyness 兜底、B2 纸面 delta 对冲成本（多头 perp 付 funding、收侧不记）、B3 滚动参照未满样本 → 失效、`--b3-paper-delta` 备选模式、buffer 含 `vol_path_haircut`、fixture 回放（三家族齐全、B1 / B2 越过 buffer → 持续度 → pass 路径、B3 越过但不 pass、A1 同窗对照、summary 无禁语）、Phase A fixture 兼容（单到期 → 零记录 + skipped 计数）、CLI、假 OKX 公共源全 GET。全部离线（客户端 / 扫描器测试用本机 `http.server` 假 OKX）。
 
 ### 8. 只读纸面多腿套利扫描器 · Phase A（`strategies/paper_arb_scanner.py`）
 
@@ -340,6 +341,59 @@ uv run python strategies/paper_arb_scanner.py --source okx-public \
 
 **验证分级（不得跳级）**：① `--source fixture` 历史 / fixture 回放 → ② `--source okx-public` live 只读观察 → ③ `--paper-fills` 纸面成交 → ④ 只有 ①–③ 通过才提交 `04-risk` + 用户确认。**本模块止步于 ③；不含、也不会含 live execution。** ChatGPT 分享页只是 idea 来源（`source_inspiration=chatgpt_share_unverified`），不是回测证据。fixture 里的越过 buffer 记录是合成的，不代表市场上存在机会。
 
+### 9. 只读纸面对冲组合评分 · Phase B（`strategies/paper_combo_scanner.py`）
+
+**研究侧支，与 §8 的 A1 / A2 / A3 并列，不替换它们，不并入现货网格 / `local_paper` 主线。** 对应提案 `paper-combo-strategies-phase-b-v1`（`03-proposals/2026-09-17-paper-combo-strategies-phase-b-v1.md` + 旁路 JSON）与 `04-risk/2026-09-17-…` **附条件通过（仅只读指标 + 纸面成交）**。Phase A 首扫 65 条净边全负是这条侧支的出发点：身份边薄 → 研究转向**显式相对价值组合**，仍是纸面；**不是**用杠杆或下单去「找回边」。**合 PR ≠ 放行交易；live execution 不在批准范围。**
+
+代码层硬门禁（都有单测；实现复用 §8 的 `Book` / `Leg` / `Snapshot` / fixture 加载 / 流动性与持续度过滤 / OKX 公共只读源，不复制一份）：
+
+| 门禁 | 实现 |
+|------|------|
+| `action` 恒 `observe_only`，`will_send_http` 恒 `false`，`phase` 恒 `"B"` | 常量 + `finalize_combo_record()`；改了就抛 `ObserveOnlyViolation` / `ComboSchemaViolation` |
+| **全部 `taxonomy = relative_value`**；禁止无风险标签 | `taxonomy` 只接受 `relative_value`；记录 JSON 文本里出现 `risk_free` / `riskfree` / `无风险` / `稳赚` / `guaranteed` 任一字样 → `ForbiddenLabelViolation`；每条必带 `relative_value_not_riskless` |
+| 继承 Phase A schema + `combo_id` / `hedge_mode` / `residual_risks` | `REQUIRED_FIELDS = Phase A 字段 + 4 个组合字段`；`combo_id` 必须与 `family` 对应（B1/B2/B3）；`hedge_mode` 白名单：B1 `static_combo`、B2 `paper_delta_sim_only`、B3 `options_rr_static` / `options_rr_plus_paper_delta`；`residual_risks` 必须**包含**该家族的强制名单（缺项拒绝） |
+| 可执行价只能 bid / ask | 复用 Phase A `Leg` 闸门。**IV / delta / 模型公平价全部来自 mid，仅作选约与参照**（`model_fair_from_mid_iv_reference_only` flag；字段名带 `_ref`），永不作可执行价 |
+| **不裸卖期权**（1x 概念） | `assert_covered_short_options()`：短 call ↔ 多头标的（qty ≥）或同类多头期权且**到期 ≥**；短 put 同理。**B1 的短 call 必须由 spot 名义覆盖**（perp 多头不算）；**反向日历**（卖远买近）到期后裸奔 → 拒绝；**B3 无翼 RR 不建记录**（计入 `skipped.b3_no_wing_cover_*`），有翼才评分。`cover` 字段写明每条短腿被谁覆盖 |
+| **B2 delta 对冲仅纸面模拟** | `paper_delta_hedge_sim()` 纯算术，无任何 HTTP；输出块 `paper_delta_sim` 恒 `live_hedge_http=false` / `order_sent=false`；B2 记录必须 `enabled=true`，其成本进 `costs_bps.hedge_rebalance`（不许藏进「残差」） |
+| 零 Trade / amend / 提现 / 划转 | 唯一网络路径仍是 `tools/okx_readonly_client.py` 公共 GET；单测断言源码不含 `/api/v5/trade`、`urlopen`、`POST`，且不 import 网格模块 |
+| `safety_buffer` 含 `vol_path_haircut` 且默认未标定 | `ComboSafetyBuffer = fee_roundtrip + slip + funding_uncert + vol_path_haircut + model_haircut`，`calibrated=false`，输出里明写「未标定不得喊有可交易边」 |
+
+**三个家族（同所，默认 OKX · ETH 概念）**
+
+| ID | family | hedge_mode | 腿（买 @ask / 卖 @bid） | 毛边（quote，除以 `N = spot ask × qty` 得 bps） | 强制残留风险 |
+|----|--------|-----------|--------------------------|-----------------------------------------------|--------------|
+| B1 | `B1_covered_call_carry` | `static_combo` | 买 spot @ask + 卖 perp @bid（名义对齐）+ 卖 OTM call @bid（Δ ∈ `[0.15, 0.25]`，无匹配则退到 moneyness 带 `[5%, 30%]` 并打 `otm_selection_by_moneyness_fallback`；每到期最多 2 条） | `min(f_now, f_next) × H × N` + `(call_bid − fair_ATMσ)` + 基差（不利必记、有利 opt-in）。`fair_ATMσ` = 同到期 ATM mid IV 的 Black-76 公平价（平坦偏斜参照）；即「卖的 call 相对 ATM 有多富」。theta 不记（`theta_carry_credited=false`）。负 funding → 记 `funding_expected` 成本；预测翻号 → `funding_sign_flip_predicted` 失效 | `gamma` `funding_flip` `gap` `margin` `basis` `capped_upside` |
+| B2 | `B2_calendar_vol` | `paper_delta_sim_only` | 买远月 @ask + 卖近月 @bid，**同类型同 K**（默认 call，`--b2-opt-type P` 对照）；相邻到期配对，ATM 附近最多 6 个 K | `fair_debit(σ_near) − exec_debit`，`exec_debit = far_ask − near_bid`，`fair_debit = B76(far, σ_near_mid) − B76(near, σ_near_mid)`（平坦期限参照 → 远月相对近月 vol 便宜才有边）。纸面 delta 对冲：入场对冲 `−Δ_net`、每日 3 次再平衡各交易 `E|Δδ| = |Γ|·S·σ·√dt·√(2/π)`，每笔付费 + 半点差 + 2 bp slip；perp 对冲付侧 funding 记成本、收侧不记；全部进 `hedge_rebalance` / `funding_*` | `gamma` `vega_term_structure` `gap` `margin` `hedge_slippage_underestimation` `model_risk` |
+| B3 | `B3_put_skew_rr` | `options_rr_static`（`--b3-paper-delta` → `options_rr_plus_paper_delta`） | 同到期：25Δ call 与 25Δ put（mid IV 求 Δ，最近者），**加更远 OTM 10Δ 同类多头翼覆盖短腿**。`long_rr`：买 call @ask + 卖 put @bid + 买 put 翼 @ask；`short_rr`：卖 call @bid + 买 put @ask + 买 call 翼 @ask | `RR = IV(call) − IV(put)`；`RR_exec` 用买腿 ask / 卖腿 bid 的 IV 合成；参照 `RR_ref` 默认 = **之前快照** mid RR 的滚动中位数（≥ 2 个先验样本，否则 `rr_reference_unavailable` 失效，边按自身 mid 算只剩点差成本），或 `--b3-rr-ref-mode fixed`。边 = 有符号偏离（vol 点）× 平均 vega。翼视为公平价保险：只记其半点差 + 费用，不记边 | `skew_trend` `gamma` `gap` `margin` `spot_direction_bleed` `liquidity` |
+
+`costs_bps` = Phase A 九项 + `vol_path_haircut`（每条短期权腿默认 10 bp 名义；`--vol-path-haircut-bps`）。持有期统一按 `--horizon-intervals`（默认 3 × 8h = 1 天）：到期 ≤ 持有期 → 结算费；否则按**再跨一次全价差**回购（`hold.exit_rule`）。`margin_capital_required`：B1 = spot 名义 + perp 1x 保证金（call 由 spot 备兑，不另计）；B2 = 净支出 + 对冲名义；B3 = 支付权利金 + 翼距（定义最大亏损）+（若开）对冲名义。
+
+**H-B1 对照 A1**：同一快照上顺手跑 §8 的 A1（复用 `ArbScanner.scan_a1`），每条 B1 记录带 `a1_reference_same_window` 与 `b1_minus_a1_net_edge_bps`，summary 里 `hypotheses.H-B1.a1_pass_rate_same_window` / `b1_pass_rate_minus_a1`。平坦偏斜下备兑边 = −点差 → B1 天然劣于 A1；只有 call 相对 ATM 明显偏富时才反过来。A1 对照**不是** Phase B 记录，不进 JSONL。
+
+**输出**：每条一行 JSON（提案 §6 schema 全部强制字段 + `cover`、`paper_delta_sim`、`hold`、家族块 `call` / `term_structure` + `calendar` / `rr` + `strikes` + `deltas_mid_ref`、`invalidation` 名单、`related_phase_A`）。summary：各家族记录 / 越过 buffer / pass / 净边中位数 / `hedge_modes`，H-B1 / H-B2 / H-B3 状态与 `falsify_if`，`a1_reference_same_window`，`skipped` 计数（如 `b2_single_expiry`、`b3_no_wing_cover_long_rr`），`live_delta_hedge=false`，完整 config 与 policy。
+
+```bash
+uv run python strategies/paper_combo_scanner.py --help
+
+# 离线：回放双到期合成 fixture（4 快照 × 30s；2–4 号快照故意压低远月 vol、抬高近月 2800 call，3–4 号抬高近月 2200 put，
+# 以覆盖 B2 / B1 越过 buffer → 持续度 → pass 与 B3 越过但不 pass 的代码路径；全部合成，非行情）
+uv run python strategies/paper_combo_scanner.py --source fixture --out /tmp/combo.jsonl \
+  --summary-out /tmp/combo-summary.json --print-summary --quiet
+
+# 只看越过 buffer 的，附保守 paper fill；B3 用备选「RR + 纸面 delta」模式
+uv run python strategies/paper_combo_scanner.py --only-exceeding --paper-fills --b3-paper-delta
+
+# Phase A fixture 也能加载（单到期 → B2 无配对、B3 无翼 → 零记录，summary.skipped 说明原因）
+uv run python strategies/paper_combo_scanner.py --fixture fixtures/arb_books/2026-09-16-eth-books-sample.json --print-summary --quiet
+
+# 只读 live 观察：OKX 公共盘口 GET（无密钥），最近 2 个到期 × 8 个行权价，5 个快照 × 20s
+uv run python strategies/paper_combo_scanner.py --source okx-public \
+  --opt-family ETH-USD --n-strikes 8 --max-expiries 2 --samples 5 --interval-sec 20 \
+  --out /tmp/combo-live.jsonl --summary-out /tmp/combo-live-summary.json
+```
+
+**分阶段（不得跳级，同提案 §7）**：① 只读指标（本模块 `--source fixture` / `--source okx-public`）→ ② 纸面成交（`--paper-fills`，B2 纸面 delta 路径）→ ③ 风控审查 → ④ **用户确认**后才允许讨论日后执行请求。**本模块止步于 ②。** 明确不做：裸卖波动率（默认否决）、跨所原子成交、实盘动态 delta、用 mark / mid 报边、并入网格主线、>1x。B3 的 put skew 垂直价差备选扫描未实现（本版只做带翼 RR 主扫描）。
+
 ## CI
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
@@ -347,13 +401,14 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 **job `paper-smoke`（离线，阻塞）**
 
 1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 同步空运行时（不装交易栈、不装 ruff）。
-2. 七个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+2. 八个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
 3. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
 4. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
 5. `okx_readonly_client.py private-status` 在清空 `OKX_*` 环境后必须打印 `skipped=true`（无密钥 stub），`policy` 里 `will_send_http/order/amend/withdraw/transfer` 全为 false。
 6. `paper_arb_scanner.py --source fixture --paper-fills`（离线 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、腿的 `price_type∈{bid,ask}` 且买 ask / 卖 bid、A1 为 `relative_value`、A2/A3 为 `identity_approx*`、`costs_bps.total` 存在、`paper_fill.order_sent=false`、三个家族都出现、卖箱永不 pass、summary 里 `trading_http` 全 false、`safety_buffer.calibrated=false`、H-A1/H-A2/H-A3 都有状态。
-7. `python -m unittest discover -s tests`（标准库，无网络）。
-8. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+7. `paper_combo_scanner.py --source fixture --paper-fills`（Phase B 双到期合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`phase=B`、`taxonomy=relative_value`、`combo_id` 与 `family` 对应、`hedge_mode` 在白名单、`residual_risks` 含家族强制名单、腿 bid/ask 且买 ask / 卖 bid、每条短期权腿都有 `cover`、`paper_delta_sim.live_hedge_http=false`（B2 必 `enabled=true`）、`costs_bps.vol_path_haircut` 与 `safety_buffer.vol_path_haircut_bps` 存在、记录文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、三家族齐全；summary 里 `live_delta_hedge=false`、`trading_http` 全 false、`calibrated=false`、`leverage_concept=1`、H-B1/H-B2/H-B3 都有状态、A1 同窗对照条数 = 快照数、`mainline_unchanged`。
+8. `python -m unittest discover -s tests`（标准库，无网络）。
+9. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **job `public-read-smoke`（出网，`continue-on-error: true`，不阻塞）**
 
