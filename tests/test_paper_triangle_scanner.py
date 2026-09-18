@@ -10,8 +10,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
@@ -401,6 +403,19 @@ class SyncGateTest(unittest.TestCase):
         )
         self.assertTrue(all(x["book_sync"]["ok"] for x in r.values()))
 
+    def test_gate_is_labelled_strict_and_default_window_is_unchanged(self):
+        self.assertEqual(pts.SYNC_GATE, "strict")
+        self.assertEqual(pts.TriangleConfig().max_book_skew_ms, 200)
+        self.assertEqual(pts.build_parser().get_default("max_book_skew_ms"), 200)
+        r = by_dir(pts.TriangleScanner(cfg()).scan(snap()))[pts.DIRECTION_A]
+        self.assertEqual(r["book_sync"]["sync_gate"], "strict")
+        self.assertIsNone(r["book_sync"]["fetch"])  # fixture snapshots carry no fetch block
+        # no relaxed mode exists anywhere in the module: a relaxation must be a written,
+        # split-reported change, never a silent knob
+        src = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn('"relaxed"', src)
+        self.assertNotIn("sync_gate=relaxed", src)
+
 
 class LiquidityGateTest(unittest.TestCase):
     def test_half_spread_cap_15bp(self):
@@ -530,6 +545,65 @@ class SummaryTest(unittest.TestCase):
         text = json.dumps(s, ensure_ascii=False).lower()
         for bad in pts.FORBIDDEN_LABELS:
             self.assertNotIn(bad, text)
+
+    def test_sync_report_splits_full_sample_and_synced_subset(self):
+        sc = pts.TriangleScanner(cfg())
+        recs = []
+        recs += sc.scan(snap())  # synced, gross < 0
+        recs += sc.scan(snap(books(cross=(0.03787, 0.03789)), ts=T0 + 1))  # synced, A net > 0
+        recs += sc.scan(snap(books(cross=(0.03787, 0.03789), ts_cross=T0 - 450), ts=T0 + 2))
+        recs += sc.scan(snap(books(ts_btc=T0 + 399), ts=T0 + 3))  # stale, no edge
+        recs += sc.scan(snap(books(ts_eth=0), ts=T0 + 4))  # timestamp missing
+        s = pts.summarize(recs, 5, cfg(), {"kind": "fixture", "http_fetch": False}, sc.skipped)
+        sr = s["sync_report"]
+        self.assertEqual(sr["sync_gate"], "strict")
+        self.assertIs(sr["gate_unchanged"], True)
+        self.assertEqual(sr["max_skew_ms"], 200)
+        self.assertIsNone(sr["fetch_mode"])  # fixture source has no fetch block
+        self.assertEqual((sr["records"], sr["synced"], sr["stale_book"]), (10, 4, 4))
+        self.assertEqual(sr["book_timestamp_missing"], 2)
+        self.assertEqual(sr["synced_rate"], 0.4)
+        self.assertEqual(sr["stale_book_rate"], 0.4)
+        sk = sr["skew_ms"]
+        self.assertEqual((sk["n"], sk["min"], sk["max"]), (8, 0, 450))
+        self.assertEqual(sk["p90"], 450)
+        self.assertEqual((sk["within_gate"], sk["within_gate_rate"]), (4, 0.5))
+        sub = sr["subsets"]
+        self.assertEqual(sub["all"], s["metrics"])
+        self.assertEqual(sub["synced"]["records"] + sub["stale_or_missing"]["records"], 10)
+        self.assertEqual(sub["synced"]["stale_book"], 0)
+        self.assertEqual(sub["stale_or_missing"]["stale_book"], 4)
+        # the synced subset is where net>0 is judged; the stale subset also carries a
+        # synthetic net>0 (cross rich at T0+2) but it can never pass
+        self.assertEqual(sub["synced"]["net_positive"], 1)
+        self.assertEqual(sub["stale_or_missing"]["net_positive"], 1)
+        self.assertEqual(sub["stale_or_missing"]["passes_threshold"], 0)
+        self.assertEqual(sub["synced"]["passes_threshold"], 1)
+        h = s["hypotheses"]["H-T1"]["synced_subset"]
+        self.assertEqual(h["records"], 4)
+        self.assertEqual(h["synced_rate"], 0.4)
+        self.assertEqual(h["net_positive_rate"], 0.25)
+        self.assertEqual(h["pass_rate"], 0.25)
+        text = json.dumps(s, ensure_ascii=False).lower()
+        self.assertNotIn("relaxed", text)
+        for bad in pts.FORBIDDEN_LABELS:
+            self.assertNotIn(bad, text)
+
+    def test_sync_report_all_stale_is_reported_not_hidden(self):
+        # the T1-002 situation: every record stale → synced subset empty, rates None, never a pass
+        sc = pts.TriangleScanner(cfg())
+        recs = []
+        for i in range(3):
+            recs += sc.scan(snap(books(cross=(0.03787, 0.03789), ts_cross=T0 - 450), ts=T0 + i))
+        s = pts.summarize(recs, 3, cfg(), {"kind": "fixture", "http_fetch": False})
+        sr = s["sync_report"]
+        self.assertEqual((sr["records"], sr["synced"], sr["stale_book_rate"]), (6, 0, 1.0))
+        self.assertEqual(sr["synced_rate"], 0.0)
+        self.assertEqual(sr["subsets"]["synced"]["records"], 0)
+        self.assertIsNone(sr["subsets"]["synced"]["net_positive_rate"])
+        self.assertEqual(sr["subsets"]["all"]["net_positive"], 3)  # edge exists on paper …
+        self.assertEqual(sr["subsets"]["all"]["passes_threshold"], 0)  # … but stale never passes
+        self.assertEqual(s["hypotheses"]["H-T1"]["status"], "no_pass_on_window")
 
     def test_status_values(self):
         c = cfg()
@@ -814,6 +888,329 @@ class OkxPublicSourceTest(unittest.TestCase):
         self.assertIs(s["will_send_http"], False)
         self.assertEqual(s["records"], 2)
         self.assertFalse(any(r["method"] == "POST" for r in FakeTriangleOkx.requests))
+
+
+# --------------------------------------------------------------------------- fetch mode / skew
+
+
+class FakeLatencyOkx(BaseHTTPRequestHandler):
+    """Threaded fake OKX books endpoint with a fixed per-request latency. `ts` is stamped from
+    the *real* wall clock when the request arrives (the venue clock), then the handler sleeps.
+
+    Sequential fetch: request k cannot arrive before response k−1 returned, so the venue
+    timestamps of book 1 and book 3 are ≥ 2 × LATENCY apart — the T1-001/002 mechanism.
+    Parallel fetch: all three arrive within thread-start jitter."""
+
+    LATENCY_S = 0.12
+    requests: list[dict] = []
+    lock = threading.Lock()
+
+    def log_message(self, *_a):
+        pass
+
+    def do_POST(self):  # noqa: N802
+        with self.lock:
+            FakeLatencyOkx.requests.append({"method": "POST", "path": self.path})
+        body = json.dumps({"code": "405", "msg": "never", "data": []}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        arrived_ms = time.time_ns() // 1_000_000
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        with self.lock:
+            FakeLatencyOkx.requests.append({"method": "GET", "path": u.path, "query": q})
+        time.sleep(self.LATENCY_S)
+        bids, asks, _ = FakeTriangleOkx.books[q["instId"]]
+        body = json.dumps(
+            {"code": "0", "msg": "", "data": [{"bids": bids, "asks": asks, "ts": str(arrived_ms)}]}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class FetchModeSkewTest(unittest.TestCase):
+    """H1 mechanism check: parallel book fetch must cut venue-clock skew vs sequential."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeLatencyOkx)
+        cls.server.daemon_threads = True
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        FakeLatencyOkx.requests.clear()
+
+    def _fetch(self, mode, **kw):
+        c = okx.OkxPublicClient(base_url=self.base)
+        s = pts.OkxPublicTriangleSource(c, book_depth=1, fetch_mode=mode, **kw).fetch()
+        return c, s
+
+    def test_sequential_skew_sums_round_trips_parallel_does_not(self):
+        lat_ms = int(FakeLatencyOkx.LATENCY_S * 1000)
+        _, seq = self._fetch(pts.FETCH_SEQUENTIAL)
+        _, par = self._fetch(pts.FETCH_PARALLEL)
+        seq_skew = seq.source["fetch"]["book_ts_skew_ms"]
+        par_skew = par.source["fetch"]["book_ts_skew_ms"]
+        # before: skew ≥ two full round trips (deterministic lower bound) → over the 200 ms gate
+        self.assertGreaterEqual(seq_skew, 2 * lat_ms)
+        self.assertGreater(seq_skew, pts.TriangleConfig().max_book_skew_ms)
+        # after: skew is thread-start jitter only → inside the unchanged 200 ms gate
+        self.assertLess(par_skew, pts.TriangleConfig().max_book_skew_ms)
+        self.assertLess(par_skew, seq_skew)
+        # the send spread shows *why*: sequential sends are ≥ 2 latencies apart
+        self.assertGreaterEqual(seq.source["fetch"]["send_spread_ms"], 2 * lat_ms)
+        self.assertLess(par.source["fetch"]["send_spread_ms"], lat_ms)
+        # wall-clock cost per snapshot also drops from ~3 latencies to ~1
+        self.assertGreaterEqual(seq.source["fetch"]["fetch_span_ms"], 3 * lat_ms)
+        self.assertLess(par.source["fetch"]["fetch_span_ms"], 3 * lat_ms)
+        # gate result on the records, same strict window on both sides
+        for s, expect_ok in ((seq, False), (par, True)):
+            recs = pts.TriangleScanner(cfg()).scan(s)
+            self.assertEqual(len(recs), 2)
+            for r in recs:
+                self.assertEqual(r["book_sync"]["max_skew_ms"], 200)
+                self.assertEqual(r["book_sync"]["sync_gate"], "strict")
+                self.assertIs(r["book_sync"]["ok"], expect_ok)
+                self.assertEqual("stale_book" in r["risk_flags"], not expect_ok)
+                self.assertEqual(r["book_sync"]["fetch"]["mode"], s.source["fetch"]["mode"])
+                self.assertEqual(
+                    r["book_sync"]["fetch"]["book_ts_skew_ms"], r["book_sync"]["skew_ms"]
+                )
+                self.assertIs(r["will_send_http"], False)
+        # only public book GETs in either mode; never a POST
+        self.assertEqual(len(FakeLatencyOkx.requests), 6)
+        self.assertTrue(all(r["method"] == "GET" for r in FakeLatencyOkx.requests))
+        self.assertEqual({r["path"] for r in FakeLatencyOkx.requests}, {okx.PATH_BOOKS})
+        self.assertEqual(
+            {r["query"]["instId"] for r in FakeLatencyOkx.requests}, set(pts.WHITELIST_LEGS)
+        )
+
+    def test_summary_split_report_before_after(self):
+        rows = {}
+        for mode in pts.FETCH_MODES:
+            c, s = self._fetch(mode)
+            sc = pts.TriangleScanner(cfg())
+            recs = sc.scan(s)
+            summ = pts.summarize(recs, 1, cfg(), s.source, sc.skipped)
+            rows[mode] = summ["sync_report"]
+            self.assertEqual(summ["data_source"]["fetch"]["mode"], mode)
+            self.assertEqual(summ["data_source"]["requests_made"], 3)
+            self.assertEqual(summ["sync_report"]["fetch_mode"], mode)
+            self.assertEqual(summ["sync_report"]["max_skew_ms"], 200)
+        self.assertEqual(rows[pts.FETCH_SEQUENTIAL]["stale_book_rate"], 1.0)
+        self.assertEqual(rows[pts.FETCH_SEQUENTIAL]["synced_rate"], 0.0)
+        self.assertEqual(rows[pts.FETCH_PARALLEL]["stale_book_rate"], 0.0)
+        self.assertEqual(rows[pts.FETCH_PARALLEL]["synced_rate"], 1.0)
+        self.assertEqual(rows[pts.FETCH_PARALLEL]["subsets"]["synced"]["records"], 2)
+
+    def test_parallel_requests_counter_is_exact(self):
+        c = okx.OkxPublicClient(base_url=self.base)
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            list(ex.map(lambda i: c.get_books(pts.WHITELIST_LEGS[i % 3], sz=1), range(24)))
+        self.assertEqual(c.requests_made, 24)
+
+    def test_cli_fetch_mode_flags(self):
+        for mode, retries in ((pts.FETCH_SEQUENTIAL, 0), (pts.FETCH_PARALLEL, 1)):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--source",
+                    "okx-public",
+                    "--base-url",
+                    self.base,
+                    "--samples",
+                    "1",
+                    "--fetch-mode",
+                    mode,
+                    "--sync-retries",
+                    str(retries),
+                    "--print-summary",
+                    "--quiet",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=ROOT,
+                env={"PATH": "/usr/bin:/bin"},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            s = json.loads(proc.stderr)
+            f = s["data_source"]["fetch"]
+            self.assertEqual((f["mode"], f["sync_retries_allowed"]), (mode, retries))
+            self.assertEqual(s["sync_report"]["fetch_mode"], mode)
+            self.assertEqual(s["config"]["max_book_skew_ms"], 200)
+            self.assertIs(s["will_send_http"], False)
+            if mode == pts.FETCH_PARALLEL:
+                self.assertEqual(f["attempts"], 1)  # first attempt already inside the gate
+                self.assertEqual(s["sync_report"]["synced"], 2)
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertIn("--fetch-mode", proc.stdout)
+        self.assertIn("--sync-retries", proc.stdout)
+        self.assertEqual(pts.build_parser().get_default("fetch_mode"), "parallel")
+        self.assertEqual(pts.build_parser().get_default("sync_retries"), 0)
+
+
+class FakeClock:
+    def __init__(self, start=T0):
+        self.now_ms = start
+        self.lock = threading.Lock()
+
+    def now(self) -> int:
+        with self.lock:
+            return self.now_ms
+
+    def advance(self, ms: int) -> None:
+        with self.lock:
+            self.now_ms += ms
+
+
+class FakeBooksClient:
+    """No HTTP. Each get_books stamps the book with the fake clock and then advances it by
+    `latency_ms`, so in sequential mode the venue timestamps are latency_ms apart. An optional
+    per-attempt `ts_schedule` overrides the stamped ts (attempt = how many times this
+    instrument was asked for) to script retry outcomes deterministically."""
+
+    def __init__(self, clock: FakeClock, latency_ms=150, ts_schedule=None):
+        self.clock = clock
+        self.latency_ms = latency_ms
+        self.ts_schedule = ts_schedule or {}
+        self.calls: dict[str, int] = {}
+        self.requests_made = 0
+        self.lock = threading.Lock()
+
+    def get_books(self, inst_id: str, sz: int = 5) -> dict:
+        with self.lock:
+            self.calls[inst_id] = self.calls.get(inst_id, 0) + 1
+            attempt = self.calls[inst_id]
+            self.requests_made += 1
+            ts = self.clock.now()
+        self.clock.advance(self.latency_ms)
+        if attempt in self.ts_schedule:
+            ts = self.ts_schedule[attempt][inst_id]
+        bids, asks, _ = FakeTriangleOkx.books[inst_id]
+        return {
+            "instId": inst_id,
+            "bids": [(float(p), float(q)) for p, q, *_ in bids],
+            "asks": [(float(p), float(q)) for p, q, *_ in asks],
+            "ts_ms": ts,
+        }
+
+
+class FetchTimestampDocumentationTest(unittest.TestCase):
+    """Every fetch is documented with local send/receive clocks and venue book timestamps."""
+
+    def test_sequential_timestamps_are_documented_under_a_fake_clock(self):
+        clk = FakeClock()
+        c = FakeBooksClient(clk, latency_ms=150)
+        src = pts.OkxPublicTriangleSource(c, fetch_mode=pts.FETCH_SEQUENTIAL, clock=clk.now)
+        s = src.fetch()
+        f = s.source["fetch"]
+        self.assertEqual(f["mode"], "sequential")
+        self.assertEqual((f["attempts"], f["selected_attempt"]), (1, 1))
+        self.assertEqual([leg["instrument"] for leg in f["legs"]], list(pts.WHITELIST_LEGS))
+        self.assertEqual([leg["sent_ms"] - T0 for leg in f["legs"]], [0, 150, 300])
+        self.assertEqual([leg["recv_ms"] - T0 for leg in f["legs"]], [150, 300, 450])
+        self.assertEqual([leg["latency_ms"] for leg in f["legs"]], [150, 150, 150])
+        self.assertEqual([leg["book_ts_ms"] - T0 for leg in f["legs"]], [0, 150, 300])
+        self.assertEqual(f["book_ts_skew_ms"], 300)
+        self.assertEqual(f["attempt_skews_ms"], [300])
+        self.assertEqual(f["send_spread_ms"], 300)
+        self.assertEqual(
+            (f["started_ms"] - T0, f["finished_ms"] - T0, f["fetch_span_ms"]), (0, 450, 450)
+        )
+        self.assertEqual(f["max_skew_ms"], 200)
+        self.assertEqual(s.ts_ms, T0 + 300)  # snapshot ts = newest book
+        self.assertEqual(s.source["requests_made"], 3)
+        self.assertIs(s.source["http_fetch"], True)
+        r = by_dir(pts.TriangleScanner(cfg()).scan(s))[pts.DIRECTION_A]
+        self.assertEqual(r["book_sync"]["skew_ms"], 300)
+        self.assertIn("stale_book", r["invalidated_by"])
+        self.assertEqual(r["book_sync"]["fetch"], f)
+        self.assertEqual(
+            {leg["instrument"]: leg["book_ts_ms"] for leg in f["legs"]},
+            r["book_sync"]["book_ts_ms"],
+        )
+
+    def test_sync_retries_stop_at_first_attempt_inside_the_gate(self):
+        clk = FakeClock()
+        aligned = {i: T0 + 5_000 for i in pts.WHITELIST_LEGS}
+        c = FakeBooksClient(clk, latency_ms=150, ts_schedule={3: aligned})
+        src = pts.OkxPublicTriangleSource(
+            c, fetch_mode=pts.FETCH_SEQUENTIAL, sync_retries=4, clock=clk.now
+        )
+        s = src.fetch()
+        f = s.source["fetch"]
+        self.assertEqual(f["sync_retries_allowed"], 4)
+        self.assertEqual((f["attempts"], f["selected_attempt"]), (3, 3))  # stopped early
+        self.assertEqual(f["attempt_skews_ms"], [300, 300, 0])
+        self.assertEqual(f["book_ts_skew_ms"], 0)
+        self.assertEqual(s.source["requests_made"], 9)
+        self.assertEqual(s.ts_ms, T0 + 5_000)
+        r = by_dir(pts.TriangleScanner(cfg()).scan(s))[pts.DIRECTION_A]
+        self.assertTrue(r["book_sync"]["ok"])
+        self.assertEqual(r["book_sync"]["fetch"]["attempt_skews_ms"], [300, 300, 0])
+
+    def test_sync_retries_exhausted_keeps_last_attempt_still_stale(self):
+        clk = FakeClock()
+        c = FakeBooksClient(clk, latency_ms=150)
+        src = pts.OkxPublicTriangleSource(
+            c, fetch_mode=pts.FETCH_SEQUENTIAL, sync_retries=2, clock=clk.now
+        )
+        s = src.fetch()
+        f = s.source["fetch"]
+        self.assertEqual((f["attempts"], f["selected_attempt"]), (3, 3))
+        self.assertEqual(f["attempt_skews_ms"], [300, 300, 300])
+        self.assertEqual(f["started_ms"] - T0, 900)  # the *last* attempt's books are kept
+        self.assertEqual(s.source["requests_made"], 9)
+        r = by_dir(pts.TriangleScanner(cfg()).scan(s))[pts.DIRECTION_A]
+        self.assertFalse(r["book_sync"]["ok"])
+        self.assertIn("stale_book", r["risk_flags"])
+        self.assertFalse(r["passes_threshold"])
+
+    def test_no_retry_by_default_and_parallel_retry_schedule(self):
+        clk = FakeClock()
+        c = FakeBooksClient(clk, latency_ms=150)
+        s = pts.OkxPublicTriangleSource(c, fetch_mode=pts.FETCH_SEQUENTIAL, clock=clk.now).fetch()
+        self.assertEqual(s.source["fetch"]["attempts"], 1)
+        self.assertEqual(s.source["requests_made"], 3)
+        # parallel mode with a scripted second attempt inside the gate
+        clk = FakeClock()
+        stale = {"ETH-USDT": T0, "BTC-USDT": T0 + 250, "ETH-BTC": T0 + 500}
+        good = {"ETH-USDT": T0 + 1000, "BTC-USDT": T0 + 1010, "ETH-BTC": T0 + 1005}
+        c = FakeBooksClient(clk, ts_schedule={1: stale, 2: good})
+        s = pts.OkxPublicTriangleSource(
+            c, fetch_mode=pts.FETCH_PARALLEL, sync_retries=1, clock=clk.now
+        ).fetch()
+        f = s.source["fetch"]
+        self.assertEqual(f["mode"], "parallel")
+        self.assertEqual(f["attempt_skews_ms"], [500, 10])
+        self.assertEqual((f["attempts"], f["selected_attempt"]), (2, 2))
+        self.assertEqual(s.ts_ms, T0 + 1010)
+        self.assertEqual(sorted(c.calls.values()), [2, 2, 2])
+
+    def test_source_refuses_bad_knobs(self):
+        c = FakeBooksClient(FakeClock())
+        with self.assertRaises(ValueError):
+            pts.OkxPublicTriangleSource(c, fetch_mode="websocket")
+        with self.assertRaises(ValueError):
+            pts.OkxPublicTriangleSource(c, sync_retries=-1)
+        with self.assertRaises(ValueError):
+            pts.OkxPublicTriangleSource(c, max_skew_ms=-1)
 
 
 # --------------------------------------------------------------------------- slip_crossings
