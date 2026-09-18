@@ -343,11 +343,17 @@ jobs:
       # residual_risks (non-atomic three-leg), a book_sync block (skew > 200 ms → stale_book, never
       # passes), a per-leg half-spread cap (15 bp → illiquid) and gross / net / costs taken verbatim
       # from the cost_engine block. Fixture dislocations are synthetic code-path checks, not evidence.
+      # Stale-fix v1 (03-proposals / 04-risk 2026-09-18 t1-stale-fix-reread-v1): the sync gate stays
+      # strict at 200 ms (no relaxed mode exists); skew is lowered by *how* books are fetched
+      # (--fetch-mode parallel, --sync-retries) and every summary splits full sample vs the
+      # !stale_book subset (sync_report). Paper only: nothing here can send an order.
       - name: Paper triangle scanner (T1) — fixture replay, observe_only, cost_engine is the edge
         run: |
           set -euo pipefail
           uv run --locked --no-dev python strategies/paper_triangle_scanner.py --source fixture \
             --out /tmp/t1.jsonl --summary-out /tmp/t1-summary.json --quiet
+          uv run --locked --no-dev python strategies/paper_triangle_scanner.py --help > /tmp/t1-help.txt
+          grep -q -- '--fetch-mode' /tmp/t1-help.txt && grep -q -- '--sync-retries' /tmp/t1-help.txt
           uv run --locked --no-dev python -c "
           import json
           rows = [json.loads(l) for l in open('/tmp/t1.jsonl') if l.strip()]
@@ -373,6 +379,8 @@ jobs:
               assert r['costs_bps']['total'] == ce['all_in_cost_bps']
               assert r['costs_bps']['fees'] > 0 and r['costs_bps']['half_spread_slip'] > 0, r['costs_bps']
               assert r['book_sync']['max_skew_ms'] == 200 and r['liquidity']['max_half_spread_bps'] == 15.0
+              assert r['book_sync']['sync_gate'] == 'strict', r['book_sync']
+              assert r['book_sync']['fetch'] is None, 'fixture snapshots carry no fetch block'
               if 'stale_book' in r['risk_flags'] or 'illiquid' in r['risk_flags']:
                   assert r['passes_threshold'] is False, 'stale / illiquid can never pass'
               assert r['synthetic_fill']['order_sent'] is False
@@ -391,10 +399,26 @@ jobs:
               assert m[k] is not None, k
           assert 'H-T1' in s['hypotheses'] and s['data_source']['http_fetch'] is False
           assert s['mainline_unchanged'] == 'spot_grid_local_paper'
+          # stale-fix v1: strict gate labelled, split report present and internally consistent
+          sr = s['sync_report']
+          assert sr['sync_gate'] == 'strict' and sr['gate_unchanged'] is True and sr['max_skew_ms'] == 200, sr
+          assert sr['fetch_mode'] is None, 'fixture source has no fetch block'
+          assert sr['subsets']['all'] == m, 'subsets.all must be the full-sample metrics'
+          assert sr['subsets']['synced']['records'] + sr['subsets']['stale_or_missing']['records'] == sr['records']
+          assert sr['subsets']['synced']['stale_book'] == 0 and sr['subsets']['stale_or_missing']['passes_threshold'] == 0
+          assert sr['stale_book'] == m['stale_book'] and sr['synced'] + sr['stale_book'] + sr['book_timestamp_missing'] == sr['records']
+          assert sr['skew_ms']['within_gate'] == sr['synced'], sr['skew_ms']
+          assert 'synced_subset' in s['hypotheses']['H-T1']
+          assert 'relaxed' not in json.dumps(s, ensure_ascii=False).lower(), 'no relaxed sync gate may appear'
           print('paper_triangle_scanner: %d records / %d snapshots ok; net>0 rate=%s cost_kill_rate=%s '
                 'synthetic_fill=%s stale=%d illiquid=%d pass=%d'
                 % (len(rows), s['snapshots'], m['net_positive_rate'], m['cost_kill_rate'],
                    m['synthetic_fill_success_rate'], m['stale_book'], m['illiquid'], m['passes_threshold']))
+          print('sync_report: gate=%s/%dms stale_rate=%s synced_rate=%s skew(median/p90/max)=%s/%s/%s; '
+                'synced subset net>0 rate=%s pass=%d'
+                % (sr['sync_gate'], sr['max_skew_ms'], sr['stale_book_rate'], sr['synced_rate'],
+                   sr['skew_ms']['median'], sr['skew_ms']['p90'], sr['skew_ms']['max'],
+                   sr['subsets']['synced']['net_positive_rate'], sr['subsets']['synced']['passes_threshold']))
           "
 
       # Combo expansion C1–C4 (paper / read-only side branch, 04-risk conditional pass) on the
