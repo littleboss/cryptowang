@@ -24,6 +24,7 @@ import hmac
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -214,12 +215,15 @@ class OkxPublicClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.requests_made = 0
+        # The T1 scanner issues its three book GETs concurrently; keep the audit counter exact.
+        self._count_lock = threading.Lock()
 
     def _get(self, path: str, query: dict[str, str]) -> list:
         assert_read_only("GET", path, private=False)
         url = f"{self.base_url}{path}?{urllib.parse.urlencode(query)}"
         payload = _http_get(url, {}, self.timeout)
-        self.requests_made += 1
+        with self._count_lock:
+            self.requests_made += 1
         return _check_payload(payload, path)
 
     def get_ticker(self, inst_id: str) -> dict:

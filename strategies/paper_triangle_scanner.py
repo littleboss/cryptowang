@@ -18,7 +18,13 @@ Hard gates (enforced in code, tested, not just documented):
     a leg; a one-sided book skips the direction, it is never guessed;
   * sync: the three books must share a timestamp window; skew > `max_book_skew_ms` (200 ms)
     → `stale_book`, the record is logged but can never pass; a missing book timestamp is
-    treated the same way (`book_timestamp_missing`);
+    treated the same way (`book_timestamp_missing`). The gate is `sync_gate=strict` and is
+    never relaxed here; to *lower the skew itself* the okx-public source issues the three
+    GETs concurrently (`--fetch-mode parallel`, default; `sequential` is kept for A/B) and can
+    re-fetch within the same snapshot (`--sync-retries`). Every fetch is documented on the
+    record (`book_sync.fetch`: per-leg local sent/recv ms, fetch span, venue-clock skew,
+    attempts) and the summary splits every metric into full sample vs the `!stale_book`
+    subset (`sync_report`) so "no edge" and "gate removed the sample" stay distinguishable;
   * liquidity: per-leg half spread must be ≤ `max_half_spread_bps` (15 bp, C4 spirit) or the
     record is `illiquid`; depth / full walk of `qty` is required as in Phase A;
   * costs: fees + half_spread_slip (non-atomic re-quote haircut) + impact at minimum, and
@@ -43,6 +49,8 @@ import statistics
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -78,6 +86,19 @@ DIRECTIONS = (DIRECTION_A, DIRECTION_B)
 
 EXECUTABLE_PRICE_TYPES = frozenset({"bid", "ask"})
 SIDE_TO_PRICE_TYPE = {"buy": "ask", "sell": "bid"}
+
+# Sync gate label. Only "strict" exists in this module: the 200 ms window is applied as-is.
+# A written 04-risk relaxation would have to introduce `relaxed` *with* split reporting; it
+# must never be a silent knob change (see 04-risk 2026-09-18 t1-stale-fix-reread-v1).
+SYNC_GATE = "strict"
+
+# okx-public book fetch modes. `parallel` issues the three GETs concurrently (skew ≈ server
+# clock spread, not the sum of three round trips); `sequential` is the T1-001/002 behaviour
+# kept only for before/after comparison.
+FETCH_PARALLEL = "parallel"
+FETCH_SEQUENTIAL = "sequential"
+FETCH_MODES = (FETCH_PARALLEL, FETCH_SEQUENTIAL)
+DEFAULT_FETCH_MODE = FETCH_PARALLEL
 
 # Cost buckets carried on costs_bps (engine core set; no funding thesis for spot triangles).
 COST_KEYS = tuple(ce.CORE_COMPONENTS)
@@ -495,6 +516,7 @@ def book_sync(
     return (
         {
             "ok": ok,
+            "sync_gate": SYNC_GATE,
             "book_ts_ms": ts,
             "skew_ms": skew,
             "max_skew_ms": max_skew_ms,
@@ -663,6 +685,9 @@ def build_record(
 ) -> dict:
     insts = tuple(leg.instrument for leg in cycle.legs)
     sync, sync_flags = book_sync(books, insts, cfg.max_book_skew_ms)
+    # How the three books were obtained (okx-public: fetch mode, per-leg local sent/recv,
+    # attempts). Fixture snapshots carry no fetch → None. Documentation only; never a gate input.
+    sync["fetch"] = snap.source.get("fetch")
     liquidity, liq_flags, walks = triangle_liquidity(cycle, books, cfg)
     res = evaluate_cycle(cycle, books, walks, cfg)
     engine = res.to_dict()
@@ -900,6 +925,65 @@ def _metrics(rows: list[dict]) -> dict:
     }
 
 
+def _percentile(sorted_vals: list[int], q: float) -> int | None:
+    if not sorted_vals:
+        return None
+    idx = min(len(sorted_vals) - 1, max(0, round(q * (len(sorted_vals) - 1))))
+    return sorted_vals[idx]
+
+
+def sync_report(records: list[dict], cfg: TriangleConfig, source: dict | None = None) -> dict:
+    """Full sample vs `!stale_book` subset, side by side (04-risk split reporting).
+
+    The gate is not touched: `synced` is exactly `book_sync.ok` under the strict window. The
+    report exists so a re-scan can show whether the synced subset is non-empty (method
+    success) and what `net>0` / cost_kill / pass look like *on that subset* — without which
+    "no edge" and "the gate removed every sample" are indistinguishable."""
+    synced = [r for r in records if r["book_sync"]["ok"]]
+    unsynced = [r for r in records if not r["book_sync"]["ok"]]
+    skews = sorted(
+        r["book_sync"]["skew_ms"] for r in records if r["book_sync"]["skew_ms"] is not None
+    )
+    n = len(records)
+    stale = sum(1 for r in records if "stale_book" in r["risk_flags"])
+    missing = sum(1 for r in records if "book_timestamp_missing" in r["risk_flags"])
+    fetch = (source or {}).get("fetch") or {}
+    within = sum(1 for s in skews if s <= cfg.max_book_skew_ms)
+    return {
+        "sync_gate": SYNC_GATE,
+        "max_skew_ms": cfg.max_book_skew_ms,
+        "gate_unchanged": True,
+        "fetch_mode": fetch.get("mode"),
+        "sync_retries_allowed": fetch.get("sync_retries_allowed"),
+        "records": n,
+        "synced": len(synced),
+        "synced_rate": _rate(len(synced), n),
+        "stale_book": stale,
+        "stale_book_rate": _rate(stale, n),
+        "book_timestamp_missing": missing,
+        "skew_ms": {
+            "n": len(skews),
+            "min": skews[0] if skews else None,
+            "median": round(statistics.median(skews), 1) if skews else None,
+            "p90": _percentile(skews, 0.9),
+            "max": skews[-1] if skews else None,
+            "within_gate": within,
+            "within_gate_rate": _rate(within, len(skews)),
+        },
+        "subsets": {
+            "all": _metrics(records),
+            "synced": _metrics(synced),
+            "stale_or_missing": _metrics(unsynced),
+        },
+        "method_success_rule": "synced_rate > 0 (target >= 0.20) — measurability, not an edge",
+        "edge_rule": "reproducible net_edge_bps > 0 on the synced subset across >= 2 windows "
+        "→ only allows *drafting* a separate demo-size case; this module never orders",
+        "note": "same strict window as book_sync; strict is the only gate mode in this "
+        "module. Rejected fetch attempts (if --sync-retries > 0) are listed per record "
+        "under book_sync.fetch.attempt_skews_ms, never scored.",
+    }
+
+
 def summarize(
     records: list[dict],
     snapshots: int,
@@ -909,6 +993,7 @@ def summarize(
 ) -> dict:
     overall = _metrics(records)
     n_pass = overall["passes_threshold"]
+    sync = sync_report(records, cfg, source)
     if not records:
         status = "no_samples"
     elif snapshots < cfg.persistence_min_samples:
@@ -931,6 +1016,7 @@ def summarize(
         "records": len(records),
         "skipped": dict(skipped or {}),
         "metrics": overall,
+        "sync_report": sync,
         "directions": {
             d: _metrics([r for r in records if r["direction"] == d]) for d in DIRECTIONS
         },
@@ -942,6 +1028,13 @@ def summarize(
                 "synthetic_fill_success_rate": overall["synthetic_fill_success_rate"],
                 "passes_threshold": n_pass,
                 "pass_rate": overall["pass_rate"],
+                "synced_subset": {
+                    "records": sync["synced"],
+                    "synced_rate": sync["synced_rate"],
+                    "net_positive_rate": sync["subsets"]["synced"]["net_positive_rate"],
+                    "cost_kill_rate": sync["subsets"]["synced"]["cost_kill_rate"],
+                    "pass_rate": sync["subsets"]["synced"]["pass_rate"],
+                },
                 "status": status,
                 "falsify_if": FALSIFY_IF,
                 "note": "paper/read-only sample; no return claim; calibrate buffer before judging",
@@ -960,21 +1053,52 @@ def summarize(
 # --------------------------------------------------------------------------- okx public source
 
 
+def _wall_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
 class OkxPublicTriangleSource:
     """Builds a TriangleSnapshot from three public GET order books (no auth, no POST).
     Spot books report sizes in base units already (no ctVal). Each book keeps its own OKX
-    timestamp so the sync gate can measure skew."""
+    timestamp so the sync gate can measure skew.
+
+    Skew root cause (T1-001/002, stale_book 48/48, skew ≈ 400–500 ms): the three GETs were
+    issued one after another, so the venue timestamps of book 1 and book 3 were separated by
+    two full round trips. `fetch_mode=parallel` (default) issues the three GETs concurrently
+    from a small thread pool; the venue-clock skew then reflects server-side spread plus
+    thread start jitter instead of accumulated latency. `sequential` is kept for A/B.
+
+    Same-window alignment (`sync_retries`): if the parallel fetch still lands outside the
+    window, the three books are re-fetched up to N more times *within the same snapshot*
+    and the first attempt inside the window is used; if none is, the last attempt is kept
+    and is still `stale_book` under the unchanged gate. Every attempt's skew is documented.
+
+    Only read-only GETs happen here; nothing in this class can send an order."""
 
     def __init__(
         self,
         client: okx.OkxPublicClient,
         triangle: Triangle = DEFAULT_TRIANGLE,
         book_depth: int = 5,
+        fetch_mode: str = DEFAULT_FETCH_MODE,
+        sync_retries: int = 0,
+        max_skew_ms: int = TriangleConfig.max_book_skew_ms,
+        clock: Callable[[], int] | None = None,
     ):
         triangle.validate()
+        if fetch_mode not in FETCH_MODES:
+            raise ValueError(f"fetch_mode must be one of {FETCH_MODES}, got {fetch_mode!r}")
+        if sync_retries < 0:
+            raise ValueError("sync_retries must be >= 0")
+        if max_skew_ms < 0:
+            raise ValueError("max_skew_ms must be >= 0")
         self.client = client
         self.triangle = triangle
         self.book_depth = book_depth
+        self.fetch_mode = fetch_mode
+        self.sync_retries = sync_retries
+        self.max_skew_ms = max_skew_ms
+        self._clock = clock or _wall_ms
 
     def _book(self, inst_id: str) -> pas.Book:
         raw = self.client.get_books(inst_id, sz=self.book_depth)
@@ -986,10 +1110,53 @@ class OkxPublicTriangleSource:
             ts_ms=raw["ts_ms"],
         )
 
-    def fetch(self) -> TriangleSnapshot:
-        books = {i: self._book(i) for i in self.triangle.legs}
+    def _timed_book(self, inst_id: str) -> tuple[pas.Book, dict]:
+        sent = self._clock()
+        book = self._book(inst_id)
+        recv = self._clock()
+        return book, {
+            "instrument": inst_id,
+            "sent_ms": sent,
+            "recv_ms": recv,
+            "latency_ms": recv - sent,
+            "book_ts_ms": book.ts_ms,
+        }
+
+    def _fetch_once(self, attempt: int) -> tuple[dict[str, pas.Book], dict]:
+        legs = self.triangle.legs
+        started = self._clock()
+        if self.fetch_mode == FETCH_PARALLEL:
+            with ThreadPoolExecutor(max_workers=len(legs), thread_name_prefix="t1-book") as ex:
+                results = list(ex.map(self._timed_book, legs))
+        else:
+            results = [self._timed_book(i) for i in legs]
+        finished = self._clock()
+        books = {b.inst_id: b for b, _ in results}
         ts = [b.ts_ms for b in books.values() if b.ts_ms]
-        now_ms = max(ts) if ts else int(time.time() * 1000)
+        skew = (max(ts) - min(ts)) if len(ts) == len(legs) else None
+        sent = [t["sent_ms"] for _, t in results]
+        return books, {
+            "attempt": attempt,
+            "started_ms": started,
+            "finished_ms": finished,
+            "fetch_span_ms": finished - started,
+            "send_spread_ms": max(sent) - min(sent),
+            "book_ts_skew_ms": skew,
+            "legs": [t for _, t in results],
+        }
+
+    def fetch(self) -> TriangleSnapshot:
+        attempts: list[dict] = []
+        books: dict[str, pas.Book] = {}
+        chosen: dict = {}
+        for attempt in range(1, self.sync_retries + 2):
+            books, chosen = self._fetch_once(attempt)
+            attempts.append(chosen)
+            skew = chosen["book_ts_skew_ms"]
+            if skew is not None and skew <= self.max_skew_ms:
+                break
+        ts = [b.ts_ms for b in books.values() if b.ts_ms]
+        now_ms = max(ts) if ts else self._clock()
         return TriangleSnapshot(
             ts_ms=now_ms,
             venue=DEFAULT_VENUE,
@@ -1002,9 +1169,28 @@ class OkxPublicTriangleSource:
                 "http_fetch": True,
                 "requests_made": self.client.requests_made,
                 "books_per_snapshot": len(books),
+                "fetch": {
+                    "mode": self.fetch_mode,
+                    "sync_retries_allowed": self.sync_retries,
+                    "attempts": len(attempts),
+                    "selected_attempt": chosen["attempt"],
+                    "attempt_skews_ms": [a["book_ts_skew_ms"] for a in attempts],
+                    "selection_rule": "first attempt with book_ts_skew_ms <= max_skew_ms; "
+                    "otherwise the last attempt is kept and stays stale_book (gate unchanged)",
+                    "max_skew_ms": self.max_skew_ms,
+                    "started_ms": chosen["started_ms"],
+                    "finished_ms": chosen["finished_ms"],
+                    "fetch_span_ms": chosen["fetch_span_ms"],
+                    "send_spread_ms": chosen["send_spread_ms"],
+                    "book_ts_skew_ms": chosen["book_ts_skew_ms"],
+                    "legs": chosen["legs"],
+                    "clocks": "sent_ms/recv_ms/started_ms/finished_ms = local wall clock; "
+                    "book_ts_ms = OKX venue clock; skew is venue-clock only",
+                },
                 "assumptions": [
-                    "spot sizes are base units; three sequential GETs, skew measured from "
-                    "OKX book timestamps and gated by max_book_skew_ms"
+                    "spot sizes are base units; three public GETs per attempt "
+                    f"({self.fetch_mode}); skew measured from OKX book timestamps and gated "
+                    "by max_book_skew_ms (strict, unchanged)"
                 ],
             },
         )
@@ -1034,6 +1220,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval-sec", type=float, default=20.0, help="okx-public: seconds between")
     p.add_argument("--base-url", default=okx.OKX_PUBLIC_BASE)
     p.add_argument("--timeout", type=float, default=10.0)
+    p.add_argument(
+        "--fetch-mode",
+        choices=list(FETCH_MODES),
+        default=DEFAULT_FETCH_MODE,
+        help="okx-public: parallel = the three book GETs are issued concurrently (skew no "
+        "longer sums three round trips); sequential = T1-001/002 behaviour, kept for A/B",
+    )
+    p.add_argument(
+        "--sync-retries",
+        type=int,
+        default=0,
+        help="okx-public: re-fetch the three books up to N more times within the same "
+        "snapshot while venue-clock skew > --max-book-skew-ms; the gate itself is unchanged "
+        "and every attempt's skew is written to book_sync.fetch.attempt_skews_ms",
+    )
 
     p.add_argument("--notional-quote", type=float, default=100.0, help="home ccy notional in")
     p.add_argument("--max-book-skew-ms", type=int, default=200)
@@ -1101,7 +1302,14 @@ def run(args: argparse.Namespace) -> tuple[list[dict], dict]:
         n = len(snaps)
     else:
         client = okx.OkxPublicClient(base_url=args.base_url, timeout=args.timeout)
-        src = OkxPublicTriangleSource(client, triangle=cfg.triangle, book_depth=args.book_depth)
+        src = OkxPublicTriangleSource(
+            client,
+            triangle=cfg.triangle,
+            book_depth=args.book_depth,
+            fetch_mode=args.fetch_mode,
+            sync_retries=args.sync_retries,
+            max_skew_ms=cfg.max_book_skew_ms,
+        )
         n = max(args.samples, 1)
         source = {}
         for i in range(n):
