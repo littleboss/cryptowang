@@ -11,7 +11,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 | 路径 | 内容 |
 |------|------|
 | `pyproject.toml` / `uv.lock` | uv 工程元数据与锁文件（唯一第三方运行时依赖：官方 `python-okx==0.4.4`，只经只读门面可达） |
-| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）**、**只读纸面现货三角扫描器（菜单 T1：ETH-USDT / BTC-USDT / ETH-BTC，`same_venue_microstructure`，研究侧支）**、**只读纸面组合扩搜 C1–C4（`paper_combo_expansion.py`：少腿 / 深簿 / 可证伪，净边只出自 Cost Engine，研究侧支）** |
+| `strategies/` | 策略与参数 schema、OKX Bot amend **打印**适配、**基线 vs 实验臂 A/B 对照 + 假设评分模块**、**只读纸面多腿套利扫描器（Phase A，研究侧支）**、**只读纸面对冲组合评分（Phase B：B1/B2/B3，相对价值，研究侧支）**、**只读纸面现货三角扫描器（菜单 T1：ETH-USDT / BTC-USDT / ETH-BTC，`same_venue_microstructure`，研究侧支）**、**只读纸面组合扩搜 C1–C4（`paper_combo_expansion.py`：少腿 / 深簿 / 可证伪，净边只出自 Cost Engine，研究侧支）**、**E2 Phase A demo OMS（`e2_demo_oms.py`：E2-G1 ETH-USDT 现货分层限价梯意向构建器，纯 dry-run，无 HTTP 代码）** |
 | `tools/` | 纸面校验、观察器、**本地 paper 网格成交模拟器**、**只读 OKX 客户端**（标准库后端 `okx_readonly_client.py`；官方 SDK 只读门面 `okx_sdk_readonly.py`；公共行情 / 盘口 / funding GET，可选 `OKX_SIMULATED=1` 只读状态）、**Cost Engine v0**（`cost_engine.py`：全成本 / 净边 / breakeven funding 的可复用纸面算术，A/B/T1/C1–C4 扫描器共用，研究侧支） |
 | `fixtures/proposals/` | 提案 JSON（v3：基线 vs B1），供策略模块 / CI 离线消费；无密钥 |
 | `fixtures/arb_books/` | 合成盘口快照 fixture（spot / perp / 期权 + funding），供套利扫描器 / 组合评分离线回放 / CI；Phase B 用双到期版本；T1 用三腿现货簿版本（各簿带自己的时间戳）；扩搜版另带**两个交割合约簿 + funding 历史**（`…-eth-expansion-books-sample.json`）；**非行情证据** |
@@ -42,6 +42,7 @@ OKX 策略工程工具箱（纸面 / dry-run）。**推代码 ≠ 实盘。**
 - Cost Engine v0（`tools/cost_engine.py`，路线图 P0 / Phase C0）已入库：**纸面只读、observe_only、`calibrated=false`**。把 A/B 记录里的 `costs_bps` 算术升格为共用模块，输出 `all_in_cost_bps` / `net_edge_bps` / `breakeven_funding_rate` / 分量拆解；A/B 扫描器每条记录附 `cost_engine` 交叉校验块（须与 `costs_bps.total` 一致，`--no-cost-engine` 可关），`costs_bps` / `passes_threshold` 本身**不变**。拒绝 `current_funding × 365` 当净边，年化字段一律 `_ref` 展示（见 §10）。**不含** Fair-value（C1）/ Funding expectation（C3）/ Score schema / Execution；`04-risk` 附条件放行仅覆盖纸面工程。
 - 纸面现货三角扫描器 T1（`strategies/paper_triangle_scanner.py`，菜单 `demo-strategy-menu-stable-edge-v1` 的 T1，`04-risk` 同日**附条件放行只读 / paper**）已入库：**研究侧支，只读 / observe_only / `taxonomy=same_venue_microstructure`（禁 `risk_free`）**，白名单固定 `ETH-USDT` · `BTC-USDT` · `ETH-BTC` 双向环；三腿簿时间戳偏差 > 200 ms → `stale_book` 不计 pass；每腿半点差 > 15 bp → `illiquid`；**毛边 / 净边 / 成本拆解全部来自 `tools/cost_engine.py evaluate_legs`**（模块自己不算净边）；`residual_risks` 必含非原子三腿 / 残留库存。汇总只报 `net_positive_rate` / `cost_kill_rate` / 纸面合成成交率（见 §11）。**本批不授权任何 demo 下单**；不并入网格主线。
 - 组合扩搜 C1–C4（`strategies/paper_combo_expansion.py`）已入库：**研究侧支，只读 / observe_only / `phase=C` / 全部 `relative_value` / `calibrated=false`**。起点是 Cost Engine 复算 A+B n=95 → net>0 = 0%：不加腿、不加杠杆，改找**更少腿 / 更深簿 / 可证伪**的纸面候选。C1 现货 vs 交割合约基差（≤2 腿，远月 / perp 仅 `hedge_note`）、C2 funding 期望**路径** + 基差确认（禁 `current×365`）、C3 B1/B3 采样带**对称外扩一档**（Δ / moneyness ±5pp）后再过 Cost Engine 且 **N≥5 才许写结论**、C4 A2/A3 流动性硬滤（半价差 ≤25 bp · ≥1 张 · ≥50 USDT）。**一切净边只来自 `tools/cost_engine.py evaluate`**；默认 ETH，BTC 须 `--allow-btc`（本批未放行）；A/B 扫描器保留不替换（见 §12）。`04-risk` 附条件放行仅覆盖只读扫描 + 复算，**不含任何 live**。
+- E2 Phase A demo OMS（`strategies/e2_demo_oms.py`，首个策略标签 **E2-G1** = ETH-USDT 现货分层限价梯）已入库：**仅连通性 dry-run**——构建 ≤10 档 / ≤100 USDT 的挂单买梯 **意向 JSON**，`will_send_http` 默认 `false` 且在 Phase A **一律拒绝**为 `true`（无 demo env → `DemoEnvCheckFailed`；有 demo env 仍 → `PhaseASendNotImplemented`）；模块内没有任何 HTTP / SDK import，`place_order` 是显式抛错。**Phase B（真实 demo 下单）不在本 PR：须另开 `04-risk` + 用户明确确认。** 官方网格 Bot A / B′ / C 不动（见 §13）。
 - 本仓只入库纸面工具；**push ≠ 实盘**。
 
 ## 包装说明（仅工程，不是实盘）
@@ -664,6 +665,33 @@ fixture 一窗的结果只是代码路径证据：330 条，net>0 = 3 条（全�
 
 **分阶段（不得跳级）**：① 只读指标（`--source fixture` / `--source okx-public`）→ ② 纸面成交（`--paper-fills`）→ ③ `04-risk` 复审 → ④ **用户确认**后才允许讨论任何执行请求。**本模块止步于 ②，且 stub 模型 `calibrated=false` 时禁止升级「可交易」话术。** 明确不做：裸卖波动率、跨所延迟套利、多腿 live IOC、动态对冲 HTTP、mid / mark 报净边、`current×365`、并入网格主线、>1x、BTC（未点名）、覆盖不足时的任何「证伪 / 有效」结论。Fair-value（路线图 P1）/ Funding expectation（P2）模块落地后（各自另批 `04-risk`），C1 / C2 的 stub 应被替换而不是并存。
 
+### 13. E2 Phase A · demo OMS 连通性 dry-run（`strategies/e2_demo_oms.py`）
+
+**Phase A = 连通性 dry-run，只构建意向、不发任何 HTTP。** 首个策略标签 **E2-G1**：ETH-USDT 现货分层限价梯（Phase A 只做意向构建器）。对应 `04-risk` E2 约束：`will_send_http` 默认 `false`；**Phase B（真实 demo 下单）不在本 PR 范围**，须另开 `04-risk` 评审 + 用户在聊天里明确确认 + 新的执行模块；官方网格 Bot **A / B′ / C 不动**（本模块不持有任何 Bot 标识）。
+
+| 门禁 | 实现 |
+|------|------|
+| 默认不发 HTTP | `GridIntentConfig.will_send_http=False`、`DemoOms(will_send_http=False)`、`POLICY.will_send_http=false`；模块源码**没有** `urllib` / `http` / `socket` / `httpx` / `requests` / `okx` import（单测 + CI 用 AST 扫描），也不 import 只读客户端 |
+| `will_send_http=True` → 拒绝 | 缺 `OKX_SIMULATED=1` + 三个 `OKX_*` 变量 → `DemoEnvCheckFailed`；**齐全仍拒绝** → `PhaseASendNotImplemented`（env 齐 ≠ 许可；Phase A 无发送代码）。`DemoOms.place_order / amend_order / cancel_order` 调用即抛 `SendRefused` |
+| 风控预检（依次，先判发送门） | `live=True` → `LiveFlagRefused`；意向元数据缺 `x-simulated-trading=1` / `venue=okx_demo` / `demo_only` → `SimulatedIntentMetadataMissing`；非 `ETH-USDT` → `InstrumentNotApproved`；`tdMode≠cash` 或 `lever≠1` → `TdModeForbidden`；`market` / `ioc` / `fok` / `optimal_limit_ioc` → `OrderTypeForbidden`（只许 `limit` / `post_only`）；`auto_reband=True` → `AutoRebandRefused`；档数 ∉ 1..10 → `LevelsOverCap`；总名义 ∉ (0, 100] USDT → `NotionalOverCap`（配置值与按 lot 切片后的实际值都查）；最高买档 ≥ 参考价（会吃单）→ `BuyLevelAboveReference`；无 SL → `StopLossMissing`；SL 不是严格低于最低档的绝对价 → `StopLossPlacement`；单档量 < `minSz` → `SizeBelowMin` |
+| 确定性 | 价格 / 数量用 `Decimal` 按静态 `tickSz=0.01` / `lotSz=0.000001`（**未联网拉取**，`instrument.source=static_default_not_fetched`）量化；`clOrdId` = `e2g1a` + sha256 前 16 位；`plan_id` = orders 规范化 JSON 的 sha256；不传 `now` 就没有时间戳字段 → 同配置两次构建逐字节相等 |
+
+```bash
+# 默认：ref 2500、买梯 2300–2500 十档（挂单 2300…2480，配对出场 2320…2500）、总名义 100 USDT、SL 2150；stdout JSON + 落盘
+uv run python strategies/e2_demo_oms.py plan --out /tmp/e2-g1-phase-a.json
+# 拒绝路径全部退出码 3，输出 {"refused": true, "code": ..., "will_send_http": false, "orders_placed": 0}
+uv run python strategies/e2_demo_oms.py plan --will-send-http     # DemoEnvCheckFailed / PhaseASendNotImplemented
+uv run python strategies/e2_demo_oms.py plan --live               # LiveFlagRefused
+uv run python strategies/e2_demo_oms.py plan --total-notional 500 # NotionalOverCap
+uv run python strategies/e2_demo_oms.py plan --sl-trigger-px ""   # StopLossMissing
+uv run python strategies/e2_demo_oms.py policy                    # 离线策略
+uv run python strategies/e2_demo_oms.py check-env                 # 只报 set/unset，不回显任何值
+```
+
+产出 `e2_demo_oms_intent_plan_v1`：`orders[]` 每档 `instId / tdMode=cash / side=buy / ordType / px / sz / clOrdId / tag / notional_usdt / paired_exit_px`（配对卖出**只是价格标注**，Phase A 不构建卖单）、`totals`（实际名义 ≤ 100）、`stop_loss.basis=absolute_px`、`prechecks[]` 通过清单、`policy`、`phase_b_requires`、`risk_notes`、`submit_result.sent=false`。`endpoint_label` 只是给评审看的字符串，模块里没有对应的调用。
+
+**本 PR 明确不含且被代码拒绝**：任何写端点（下单 / amend / cancel）、提现 / 划转、市价 / IOC 扫单、自动重画区间、默认 `will_send_http=true`、T1 / T2 套利 live 路径、对官方 Bot 的任何操作。**Phase A 绿 ≠ 允许 demo 下单**；Phase B 另案。
+
 ## CI
 
 GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 **pull_request** 以及 **push 到 `master`** 时跑纸面冒烟：
@@ -671,7 +699,7 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 **job `paper-smoke`（离线，阻塞）**
 
 1. `astral-sh/setup-uv@v10.1.0` 安装 uv，`uv sync --locked --no-dev` 按锁文件同步运行时（标准库 + pin 死的 `python-okx`；不装 ruff、不装别的）。
-2. 十二个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
+2. 十三个脚本的 `--help` 能通过 `uv run --locked --no-dev python …` 启动（Python 3.12）。
 3. **OKX SDK 审计**：AST 扫描 `tools/ strategies/ tests/` 下所有 `.py`，import 的 `okx*` 模块必须 ⊆ `{okx, okx.MarketData, okx.Account, okx.Grid}`；导入门面后 `sys.modules` 里不得出现 `okx.Trade` 等写模块；`policy` 子命令可离线运行。
 4. `local_paper_grid.py --source synthetic`：断言 `venue=local_paper`、`will_send_http=false`、`lever=1`、`buy/sell/arbitrage > 0`、`total − fees == fee_after`。
 5. `grid_ab_compare.py` 用 `import` 与 `subprocess` 两种引擎各跑一次合成路径：断言两臂 `baseline`/`B1` 都在、`lever=1`、必填字段齐全、`arbitrage_num > 0`、两臂 K 线数一致、两引擎 metrics 相等、`adopted=false`、`bot_changed=false`、H-A/H-B/H-C 都有评分、H-C 无否决臂且 `add_position_proposals_allowed=false`；并把 markdown 表打到日志。
@@ -681,8 +709,9 @@ GitHub Actions 工作流 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 
 9. `paper_combo_scanner.py --source fixture --paper-fills`（Phase B 双到期合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`phase=B`、`taxonomy=relative_value`、`combo_id` 与 `family` 对应、`hedge_mode` 在白名单、`residual_risks` 含家族强制名单、腿 bid/ask 且买 ask / 卖 bid、每条短期权腿都有 `cover`、`paper_delta_sim.live_hedge_http=false`（B2 必 `enabled=true`）、`costs_bps.vol_path_haircut` 与 `safety_buffer.vol_path_haircut_bps` 存在、`cost_engine` 块一致且含 `vol_path_haircut`、只有 B1 有 breakeven、记录文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、三家族齐全；summary 里 `live_delta_hedge=false`、`trading_http` 全 false、`calibrated=false`（buffer 与 cost_engine 两处）、`leverage_concept=1`、H-B1/H-B2/H-B3 都有状态、A1 同窗对照条数 = 快照数、`mainline_unchanged`。
 10. `paper_triangle_scanner.py --source fixture`（T1 三腿合成 fixture 回放，无网络、无密钥）：断言每条记录 `action=observe_only`、`will_send_http=false`、`menu_id=T1`、`taxonomy=same_venue_microstructure`、三腿恰为白名单 `ETH-USDT` / `BTC-USDT` / `ETH-BTC` 且 bid/ask 买 ask / 卖 bid、`leverage_concept=1`、`residual_risks` 含非原子三腿 / 残留库存、`risk_flags` 含 `non_atomic_three_leg`、`gross_edge_bps` / `net_edge_bps` / `costs_bps.total` **等于** `cost_engine` 块对应字段、`fees` 与 `half_spread_slip` > 0、`book_sync.max_skew_ms=200`、`liquidity.max_half_spread_bps=15`、带 `stale_book` / `illiquid` 的记录 `passes_threshold=false`、`synthetic_fill.order_sent=false`、文本不含 `risk_free` / `无风险` / `稳赚` / `guaranteed`、双向都出现；summary 里 `trading_http` 全 false、buffer 与 cost_engine 两处 `calibrated=false`、`stale_book` / `illiquid` / `cost_killed` 计数 > 0（fixture 覆盖了这些路径）、`net_positive_rate` / `cost_kill_rate` / `synthetic_fill_success_rate` 非空、`H-T1` 有状态、`mainline_unchanged`；**stale-fix v1 追加**：每条记录 `book_sync.sync_gate="strict"` 且 fixture 记录 `book_sync.fetch=null`、`sync_report.sync_gate="strict"` / `gate_unchanged=true` / `max_skew_ms=200`、`subsets.all == metrics`、`synced + stale_or_missing == records`、`synced` 子集 `stale_book=0`、`stale_or_missing` 子集 `passes_threshold=0`、`H-T1.synced_subset` 存在、summary 文本不含 `relaxed`；CLI `--help` 含 `--fetch-mode` 与 `--sync-retries` 且默认 `parallel` / `0`。
 11. `paper_combo_expansion.py evaluate-fixture --paper-fills` + `policy`（C1–C4 扩搜合成 fixture 回放，无网络、无密钥）：断言 policy `will_send_http=false` / `live_execution=false` / `trading_http` 全 false / 1x / `relative_value` / C4 半价差上限 25 / 覆盖门 N=5；每条记录 `action=observe_only`、`will_send_http=false`、`phase=C`、`taxonomy=relative_value`、`combo_id` 以 `expansion_id`（C1–C4）开头、`calibrated=false`、`net_edge_source` 为 cost engine、`cost_engine` 块 `observe_only` / `calibrated=false` / `annualized=false` 且 `all_in == costs_bps.total`、`net == net_edge_bps`、`gross == gross_edge_bps`、腿 bid/ask 且买 ask / 卖 bid、C1/C2 ≤2 腿且 `model=stub` 且 `hedge_note` 全 `tradeable_default=false`、C1 `fair_value` stub 且不进净边、C2 `annualized_used_in_net_edge=false` 且有 breakeven 且基差冲突必失效、C3 只含 B1/B3 且每条短期权有 `cover`、C4 只含 A2/A3（`taxonomy_base=identity_approx`，≤4 腿）、`liquidity_ok=false` 者必不 pass 且带 `c4_illiquid_leg`、`paper_fill.order_sent=false`、文本无禁词、四族齐全；summary 里 `live_execution=false`、`underlying=ETH` 且 `allow_btc=false`、`cost_engine.mandatory` 且条数一致、`falsifiable_metrics` 四项齐全且 `calibrated=false`、B1 覆盖基线 0 且 n≥5、verdict 只在三个允许字串内、H-C1..H-C4 都有状态、C3 机制名固定、C4 有被标 illiquid 的记录、`mainline_unchanged`。
-12. `python -m unittest discover -s tests`（无网络）。
-13. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
+12. `e2_demo_oms.py plan`（E2 Phase A demo OMS，清空 `OKX_*` 后离线跑，无网络、无密钥）：断言 `schema=e2_demo_oms_intent_plan_v1`、`E2-G1` / `phase=A` / `mode=dry_run`、`will_send_http=false` / `http_sent=false` / `orders_placed=0` / `submit_result.sent=false`、policy `trading_http` 全 false / `lever=1` / `auto_reband=false`、意向元数据 `x-simulated-trading=1` + `venue=okx_demo`、`instrument.source=static_default_not_fetched`、1..10 档且实际名义 ≤ 100、每档 `ETH-USDT` / `cash` / `buy` / `limit|post_only` 且 `SL < px < ref`、`prechecks` 全过、`--out` 落盘与 stdout 同 `plan_id`、文本无禁词 / 无 `algoId`；`--live` / `--will-send-http` / `--auto-reband` / 超名义 / 超档数 / 非 ETH-USDT / 无 SL 各自**退出码 3** 且 `orders_placed=0`；给占位（非密钥）demo env + `--will-send-http` 仍退出 3（`PhaseASendNotImplemented`）且不回显；AST 扫描模块源码无 `urllib` / `http` / `socket` / `httpx` / `requests` / `okx` import，`unittest.mock` 挂在 `DemoOms.place_order` 上断言 build → submit 全程**从未调用**。
+13. `python -m unittest discover -s tests`（无网络）。
+14. 各跑一遍默认参数：`okx_grid_dry_run.py` 必须含 `"will_send_http": false` 和 `method: PRINT_ONLY`。
 
 **job `public-read-smoke`（出网，`continue-on-error: true`，不阻塞）**
 
