@@ -4,6 +4,9 @@
 # installed from the lockfile but is reachable only through the GET-only facade in
 # tools/okx_sdk_readonly.py; a step below asserts no okx.Trade / Funding / SubAccount
 # import exists anywhere in the repo.
+# The only trading-HTTP code in the repo is strategies/e2_demo_oms_v2.py (E2 OMS-v2), gated
+# behind will_send_http=True + OKX demo env + demo host; CI runs it dry-run only and proves the
+# armed path refuses without the checks. Nothing here can reach OKX demo, let alone live.
 # local_paper_grid and grid_ab_compare run on a synthetic path here (no network).
 # The only network step is a read-only GET of OKX *public* ticker/candles (no keys),
 # isolated in its own job and non-blocking.
@@ -54,6 +57,7 @@ jobs:
           uv run --locked --no-dev python strategies/paper_combo_expansion.py --help
           uv run --locked --no-dev python tools/okx_sdk_readonly.py --help
           uv run --locked --no-dev python strategies/e2_demo_oms.py --help
+          uv run --locked --no-dev python strategies/e2_demo_oms_v2.py --help
 
       # Official SDK is a read-only subset: only okx.MarketData / okx.Account / okx.Grid
       # may be imported anywhere in the repo (AST scan, not grep — docstrings mention
@@ -604,6 +608,158 @@ jobs:
           assert res.sent is False and res.orders_placed == 0 and client.place_order_calls == 0
           assert oms.GridIntentConfig().will_send_http is False and oms.DemoOms().will_send_http is False
           print('e2_demo_oms: no HTTP import; place_order never called on build→submit; default will_send_http=False ok')
+          "
+
+      # E2 OMS-v2 (strategies/e2_demo_oms_v2.py): the gated OKX-*demo* sender. CI never arms it:
+      # the default run must be dry-run with the Phase A plan byte-identical and zero HTTP;
+      # --will-send-http must exit 3 without the demo env, and with a placeholder (non-secret)
+      # demo env it must still exit 3 on a non-demo host / --live / a foreign clOrdId, echoing
+      # nothing. The armed path is only ever exercised against the in-process fake demo server
+      # in tests/test_e2_demo_oms_v2.py. urllib is allowed in this one module only, at one call
+      # site (DemoHttpSender._request); no SDK / httpx / requests; no tradingBot / asset paths.
+      - name: E2 OMS-v2 demo sender — dry-run default, armed refusals exit 3, single gated urlopen
+        run: |
+          set -euo pipefail
+          env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED -u OKX_FLAG \
+            uv run --locked --no-dev python strategies/e2_demo_oms_v2.py plan --out /tmp/e2v2-run.json \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc['schema'] == 'e2_demo_oms_v2_run_v1' and doc['oms_version'] == 'v2', doc['schema']
+          assert doc['mode'] == 'dry_run' and doc['will_send_http'] is False and doc['http_sent'] is False
+          assert doc['orders_placed'] == 0 and doc['execution']['sent'] is False
+          assert doc['execution']['schema'] == 'e2_demo_oms_v2_execution_report_v1'
+          pol = doc['policy']
+          assert pol['will_send_http'] is False and pol['merge_is_arming'] is False and pol['mode_default'] == 'dry_run'
+          assert all(v is False for v in pol['trading_http'].values()), pol['trading_http']
+          assert pol['trading_http_when_armed_demo']['withdraw'] is False and pol['trading_http_when_armed_demo']['transfer'] is False
+          assert pol['allowed_base_urls'] == ['https://www.okx.com'] and pol['forced_headers'] == {'x-simulated-trading': '1'}
+          assert pol['sides_sendable'] == ['buy'] and pol['lever'] == 1 and pol['auto_reband'] is False
+          assert pol['official_bots_untouched'] == ['A', 'B′', 'C']
+          plan = doc['plan']
+          assert plan['schema'] == 'e2_demo_oms_intent_plan_v1' and plan['will_send_http'] is False
+          assert 1 <= len(plan['orders']) <= 10 and plan['totals']['notional_usdt'] <= 100.0
+          assert all(o['side'] == 'buy' and o['ordType'] in ('limit', 'post_only') for o in plan['orders'])
+          disk = json.load(open('/tmp/e2v2-run.json'))
+          assert disk['plan']['plan_id'] == plan['plan_id']
+          text = json.dumps(doc, ensure_ascii=False).lower()
+          for bad in ('risk_free', '无风险', '稳赚', 'guaranteed', 'algoid'):
+              assert bad not in text, bad
+          print('e2_demo_oms_v2: default dry-run, %d intents, sent=False, plan_id=%s ok' % (len(plan['orders']), plan['plan_id'][:12]))
+          "
+          # Same plan as Phase A, byte for byte.
+          env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED \
+            uv run --locked --no-dev python strategies/e2_demo_oms.py plan > /tmp/e2a-plan.json
+          uv run --locked --no-dev python -c "
+          import json
+          a = json.load(open('/tmp/e2a-plan.json')); a.pop('submit_result')
+          b = json.load(open('/tmp/e2v2-run.json'))['plan']
+          assert a == b, 'OMS-v2 dry-run plan must equal the Phase A plan'
+          print('e2_demo_oms_v2: plan identical to Phase A ok')
+          "
+          # --will-send-http without the demo env: exit 3, nothing sent.
+          set +e
+          env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED -u OKX_FLAG \
+            uv run --locked --no-dev python strategies/e2_demo_oms_v2.py plan --will-send-http > /tmp/e2v2-noenv.json
+          rc=$?
+          set -e
+          test "$rc" -eq 3 || { echo "expected exit 3 for --will-send-http without env, got $rc"; cat /tmp/e2v2-noenv.json; exit 1; }
+          grep -q DemoEnvCheckFailed /tmp/e2v2-noenv.json
+          # Placeholder (non-secret) demo env + --will-send-http: a non-demo host, --live and a
+          # foreign clOrdId must each exit 3 before any socket, echoing nothing. The default demo
+          # host is deliberately NOT exercised here: CI must never send to OKX, demo or not.
+          for argv in "plan --will-send-http --base-url https://aws.okx.com" \
+                      "plan --will-send-http --base-url https://evil.example" \
+                      "plan --will-send-http --live" \
+                      "plan --will-send-http --total-notional 500" \
+                      "cancel --cl-ord-id trialbuy01 --will-send-http" \
+                      "amend --cl-ord-id trialbuy01 --new-px 2310 --will-send-http" \
+                      "cancel --cl-ord-id e2g1a0123456789abcdef --will-send-http"; do
+            set +e
+            OKX_API_KEY=ci-placeholder OKX_API_SECRET=ci-placeholder OKX_API_PASSPHRASE=ci-placeholder \
+              OKX_SIMULATED=1 uv run --locked --no-dev python strategies/e2_demo_oms_v2.py $argv > /tmp/e2v2-refused.json
+            rc=$?
+            set -e
+            test "$rc" -eq 3 || { echo "expected exit 3 for '$argv', got $rc"; cat /tmp/e2v2-refused.json; exit 1; }
+            ! grep -q ci-placeholder /tmp/e2v2-refused.json
+            uv run --locked --no-dev python -c "
+          import json
+          d = json.load(open('/tmp/e2v2-refused.json'))
+          assert d['refused'] is True and d['http_sent'] is False and d['orders_placed'] == 0, d
+          assert d['code'] in ('LiveHostRefused', 'LiveFlagRefused', 'NotionalOverCap', 'ForeignOrderRefused'), d['code']
+          print('e2_demo_oms_v2: armed refusal', d['code'])
+          "
+          done
+          # Dry-run cancel / amend / cancel-tagged: exit 0, http_sent=false, body preview only.
+          for argv in "cancel --cl-ord-id e2g1v20000000000000000" \
+                      "amend --cl-ord-id e2g1v20000000000000000 --new-px 2310 --ref-px 2500" \
+                      "cancel-tagged"; do
+            uv run --locked --no-dev python strategies/e2_demo_oms_v2.py $argv \
+              | uv run --locked --no-dev python -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          assert d['mode'] == 'dry_run' and d['will_send_http'] is False and d['http_sent'] is False, d
+          print('e2_demo_oms_v2: dry-run', d['schema'])
+          "
+          done
+          uv run --locked --no-dev python strategies/e2_demo_oms_v2.py policy > /dev/null
+          # Source audit + mock: urllib only, one urlopen call site inside DemoHttpSender._request;
+          # no SDK / httpx / requests; the disarmed and the armed-but-unchecked paths never call it.
+          uv run --locked --no-dev python -c "
+          import ast, pathlib, sys
+          from unittest import mock
+          sys.path.insert(0, 'strategies')
+          import e2_demo_oms_v2 as v2
+          import e2_demo_oms as pa
+          src = pathlib.Path('strategies/e2_demo_oms_v2.py').read_text(encoding='utf-8')
+          tree = ast.parse(src)
+          mods = set()
+          for n in ast.walk(tree):
+              if isinstance(n, ast.Import):
+                  mods.update(a.name.split('.')[0] for a in n.names)
+              elif isinstance(n, ast.ImportFrom) and n.module:
+                  mods.add(n.module.split('.')[0])
+          banned = {'http', 'socket', 'httpx', 'requests', 'okx', 'websockets'} & mods
+          assert not banned, f'forbidden import in OMS-v2: {banned}'
+          assert 'urllib' in mods
+          sites = [(c.name, f.name) for c in tree.body if isinstance(c, ast.ClassDef)
+                   for f in c.body if isinstance(f, ast.FunctionDef)
+                   for n in ast.walk(f) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'urlopen']
+          assert sites == [('DemoHttpSender', '_request')], sites
+          assert src.count('urlopen(') == 1
+          for bad in ('algoId', '/tradingBot/', 'okx.Trade', 'batch-orders', 'okx_sdk_readonly'):
+              assert bad not in src, bad
+          NO_ENV = {k: '' for k in (v2.ENV_KEY, v2.ENV_SECRET, v2.ENV_PASSPHRASE, v2.ENV_SIMULATED, v2.ENV_FLAG)}
+          PLACEHOLDER = {v2.ENV_KEY: 'ci-placeholder', v2.ENV_SECRET: 'ci-placeholder', v2.ENV_PASSPHRASE: 'ci-placeholder', v2.ENV_SIMULATED: '1'}
+          with mock.patch('urllib.request.urlopen') as urlopen, mock.patch.object(v2.DemoHttpSender, '_request', autospec=True) as req:
+              oms = v2.DemoOmsV2(env=PLACEHOLDER)  # env present but disarmed
+              plan = oms.build_plan(pa.GridIntentConfig())
+              rep = oms.submit(plan)
+              assert rep.sent is False and rep.http_sent is False and rep.orders_placed == 0
+              for name, code in (('place_order', 'PlaceOrderRefused'), ('amend_order', 'AmendRefused'), ('cancel_order', 'CancelRefused')):
+                  try:
+                      getattr(oms, name)('e2g1v20000000000000000') if name != 'place_order' else oms.place_order({})
+                  except pa.SendRefused as exc:
+                      assert exc.code == code, (name, exc.code)
+                  else:
+                      raise AssertionError(name + ' did not refuse')
+              armed = v2.DemoOmsV2(will_send_http=True, env=NO_ENV)
+              try:
+                  armed.submit(plan)
+              except pa.SendRefused as exc:
+                  assert exc.code == 'DemoEnvCheckFailed', exc.code
+              else:
+                  raise AssertionError('armed + no env did not refuse')
+              live = v2.DemoOmsV2(will_send_http=True, env=PLACEHOLDER, base_url='https://aws.okx.com')
+              try:
+                  live.submit(plan)
+              except pa.SendRefused as exc:
+                  assert exc.code == 'LiveHostRefused', exc.code
+              else:
+                  raise AssertionError('armed + live host did not refuse')
+              urlopen.assert_not_called(); req.assert_not_called()
+          assert v2.DemoOmsV2().will_send_http is False and v2.POLICY['will_send_http'] is False
+          print('e2_demo_oms_v2: urllib only at DemoHttpSender._request; disarmed / unchecked paths never open a socket ok')
           "
 
       - name: Unit tests (stdlib unittest, no network)

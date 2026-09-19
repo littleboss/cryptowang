@@ -9,8 +9,9 @@ Hard gates (enforced in code, not just in docs):
     no third-party HTTP client, no python-okx import. ``DemoOms.place_order`` is a loud refusal.
   * ``will_send_http=True`` is refused in Phase A. Without the demo env checks (OKX_SIMULATED=1
     + the three OKX_* keys) the refusal is ``DemoEnvCheckFailed``; with them it is still
-    refused (``PhaseASendNotImplemented``): Phase B needs its own 04-risk pass + explicit user
-    confirmation and is not in this file.
+    refused (``PhaseASendNotImplemented``): the gated demo executor lives in the sibling
+    ``strategies/e2_demo_oms_v2.py`` (OMS-v2) and still needs its own 04-risk pass + explicit
+    user confirmation per run. This file stays HTTP-free.
   * Risk prechecks reject: ``live=True``, missing / misplaced absolute stop-loss, total
     notional > 100 USDT, > 10 levels, any instrument other than ETH-USDT, non-``cash``
     tdMode or lever != 1, market / IOC / FOK order types, buy levels at or above the
@@ -66,7 +67,8 @@ PHASE_B_REQUIRES = [
     "separate 04-risk review for Phase B (demo orders) — this PR does not ask for it",
     "explicit user confirmation in chat (not model self-confirm)",
     f"{ENV_SIMULATED}=1 + {ENV_KEY}/{ENV_SECRET}/{ENV_PASSPHRASE} for OKX demo trading only",
-    "a new executor module; this Phase A file must stay HTTP-free",
+    "the gated executor is strategies/e2_demo_oms_v2.py (OMS-v2); this Phase A file stays "
+    "HTTP-free",
 ]
 
 RISK_NOTES = [
@@ -226,8 +228,9 @@ def run_prechecks(cfg: GridIntentConfig, env: dict[str, str] | None = None) -> l
             )
         raise SendRefused(
             "PhaseASendNotImplemented",
-            "will_send_http=True is refused: Phase A builds intents only; Phase B (demo orders) "
-            "needs its own 04-risk pass + explicit user confirmation and lives in another module",
+            "will_send_http=True is refused: Phase A builds intents only; the gated demo "
+            "executor is strategies/e2_demo_oms_v2.py (OMS-v2) and still needs 04-risk + "
+            "explicit user confirmation per run",
         )
     ok("will_send_http", "will_send_http=False (default)")
 
