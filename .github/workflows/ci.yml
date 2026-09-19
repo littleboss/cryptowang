@@ -53,6 +53,7 @@ jobs:
           uv run --locked --no-dev python tools/cost_engine.py --help
           uv run --locked --no-dev python strategies/paper_combo_expansion.py --help
           uv run --locked --no-dev python tools/okx_sdk_readonly.py --help
+          uv run --locked --no-dev python strategies/e2_demo_oms.py --help
 
       # Official SDK is a read-only subset: only okx.MarketData / okx.Account / okx.Grid
       # may be imported anywhere in the repo (AST scan, not grep — docstrings mention
@@ -512,6 +513,97 @@ jobs:
           print('paper_combo_expansion: %d records / %d snapshots ok;' % (len(rows), s['snapshots']),
                 {e: (v['records'], v['net_gt_0'], v['liquidity_ok'], v['passes_threshold']) for e, v in s['expansions'].items()},
                 'net>0 rate', fm['net_edge_bps_gt_0_rate'], 'B1 coverage', fm['sample_coverage_B1']['n'], fm['sample_coverage_B1']['verdict'])
+          "
+
+      # E2 Phase A demo OMS (E2-G1 ETH-USDT buy-ladder intent builder): dry-run only, no keys,
+      # no network. Default run must be will_send_http=false with zero orders placed; --live and
+      # --will-send-http must exit 3 (also with placeholder demo env: Phase B is not in this
+      # repo); the module's source must have no HTTP / SDK import; and DemoOms.place_order must
+      # never be called on the Phase A build → submit path. Official bots A / B′ / C untouched.
+      - name: E2 Phase A demo OMS — dry-run intents, refusals exit 3, place-order never called
+        run: |
+          set -euo pipefail
+          env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED \
+            uv run --locked --no-dev python strategies/e2_demo_oms.py plan --out /tmp/e2-plan.json \
+            | uv run --locked --no-dev python -c "
+          import json, sys
+          doc = json.load(sys.stdin)
+          assert doc['schema'] == 'e2_demo_oms_intent_plan_v1', doc['schema']
+          assert doc['strategy_id'] == 'E2-G1' and doc['phase'] == 'A' and doc['mode'] == 'dry_run'
+          assert doc['will_send_http'] is False and doc['http_sent'] is False, doc
+          assert doc['orders_placed'] == 0 and doc['submit_result']['sent'] is False
+          assert doc['policy']['will_send_http'] is False and doc['policy']['http_code_present'] is False
+          assert all(v is False for v in doc['policy']['trading_http'].values()), doc['policy']
+          assert doc['policy']['lever'] == 1 and doc['policy']['auto_reband'] is False
+          assert doc['intent_metadata']['x-simulated-trading'] == '1' and doc['venue'] == 'okx_demo'
+          assert doc['instrument']['source'] == 'static_default_not_fetched'
+          assert 1 <= len(doc['orders']) <= 10 and doc['totals']['notional_usdt'] <= 100.0
+          ref = float(doc['grid']['ref_px']); sl = float(doc['stop_loss']['slTriggerPx'])
+          for o in doc['orders']:
+              assert o['instId'] == 'ETH-USDT' and o['tdMode'] == 'cash' and o['side'] == 'buy', o
+              assert o['ordType'] in ('limit', 'post_only'), o['ordType']
+              assert sl < float(o['px']) < ref, o
+          assert doc['stop_loss']['basis'] == 'absolute_px'
+          assert all(c['ok'] for c in doc['prechecks'])
+          disk = json.load(open('/tmp/e2-plan.json'))
+          assert disk['plan_id'] == doc['plan_id'], 'artifact must match stdout'
+          text = json.dumps(doc, ensure_ascii=False).lower()
+          for bad in ('risk_free', '无风险', '稳赚', 'guaranteed', 'algoid'):
+              assert bad not in text, bad
+          print('e2_demo_oms: %d intents, notional=%.4f USDT, sent=False, plan_id=%s ok'
+                % (len(doc['orders']), doc['totals']['notional_usdt'], doc['plan_id'][:12]))
+          "
+          # Refusals must exit 3 and never claim anything was sent.
+          for flag in --live --will-send-http --auto-reband "--total-notional 500" "--levels 11" \
+                      "--inst-id BTC-USDT" "--sl-trigger-px ''"; do
+            set +e
+            eval env -u OKX_API_KEY -u OKX_API_SECRET -u OKX_API_PASSPHRASE -u OKX_SIMULATED \
+              uv run --locked --no-dev python strategies/e2_demo_oms.py plan $flag > /tmp/e2-refused.json
+            rc=$?
+            set -e
+            test "$rc" -eq 3 || { echo "expected exit 3 for '$flag', got $rc"; cat /tmp/e2-refused.json; exit 1; }
+            uv run --locked --no-dev python -c "
+          import json
+          d = json.load(open('/tmp/e2-refused.json'))
+          assert d['refused'] is True and d['will_send_http'] is False and d['orders_placed'] == 0, d
+          print('e2_demo_oms: refused', d['code'])
+          "
+          done
+          # Placeholder (non-secret) demo env + --will-send-http: still exit 3, nothing echoed.
+          set +e
+          OKX_API_KEY=ci-placeholder OKX_API_SECRET=ci-placeholder OKX_API_PASSPHRASE=ci-placeholder \
+            OKX_SIMULATED=1 uv run --locked --no-dev python strategies/e2_demo_oms.py plan \
+            --will-send-http > /tmp/e2-send.json
+          rc=$?
+          set -e
+          test "$rc" -eq 3 || { echo "expected exit 3 for demo-env send, got $rc"; cat /tmp/e2-send.json; exit 1; }
+          ! grep -q ci-placeholder /tmp/e2-send.json
+          grep -q PhaseASendNotImplemented /tmp/e2-send.json
+          echo 'e2_demo_oms: --will-send-http refused even with demo env (exit 3), nothing echoed ok'
+          # Phase A code path never reaches place-order, and the source has no HTTP / SDK import.
+          uv run --locked --no-dev python -c "
+          import ast, pathlib, sys
+          from unittest import mock
+          sys.path.insert(0, 'strategies')
+          import e2_demo_oms as oms
+          src = pathlib.Path('strategies/e2_demo_oms.py').read_text(encoding='utf-8')
+          mods = set()
+          for n in ast.walk(ast.parse(src)):
+              if isinstance(n, ast.Import):
+                  mods.update(a.name.split('.')[0] for a in n.names)
+              elif isinstance(n, ast.ImportFrom) and n.module:
+                  mods.add(n.module.split('.')[0])
+          banned = {'urllib', 'http', 'socket', 'httpx', 'requests', 'okx', 'websockets'} & mods
+          assert not banned, f'HTTP / SDK import in Phase A module: {banned}'
+          assert 'urlopen' not in src and 'okx_readonly_client' not in src and 'okx_sdk_readonly' not in src
+          client = oms.DemoOms()
+          with mock.patch.object(oms.DemoOms, 'place_order', autospec=True) as po:
+              plan = client.build_plan(oms.GridIntentConfig())
+              res = client.submit(plan)
+              po.assert_not_called()
+          assert res.sent is False and res.orders_placed == 0 and client.place_order_calls == 0
+          assert oms.GridIntentConfig().will_send_http is False and oms.DemoOms().will_send_http is False
+          print('e2_demo_oms: no HTTP import; place_order never called on build→submit; default will_send_http=False ok')
           "
 
       - name: Unit tests (stdlib unittest, no network)
