@@ -182,6 +182,34 @@ class GateTest(unittest.TestCase):
             with self.assertRaises(okx.ReadOnlyViolation):
                 okx.assert_read_only("GET", path, private=False)
 
+    def test_grid_sub_orders_allowed_for_get_only(self):
+        path = okx.PATH_GRID_SUB_ORDERS
+        self.assertEqual(path, "/api/v5/tradingBot/grid/sub-orders")
+        self.assertIn(path, okx.PRIVATE_READ_PATHS)
+        self.assertNotIn(path, okx.PUBLIC_READ_PATHS)
+        okx.assert_read_only("GET", path, private=True)  # allowed
+        with self.assertRaises(okx.ReadOnlyViolation):  # never on the unauthenticated path
+            okx.assert_read_only("GET", path, private=False)
+        for method in ("POST", "PUT", "PATCH", "DELETE", "post"):
+            for p in (path, okx.PATH_GRID_DETAILS, okx.PATH_TICKER):
+                for private in (False, True):
+                    with self.assertRaises(okx.ReadOnlyViolation, msg=(method, p)):
+                        okx.assert_read_only(method, p, private=private)
+
+    def test_trade_paths_still_refused_next_to_sub_orders(self):
+        for path in (
+            "/api/v5/trade/order",
+            "/api/v5/trade/orders-pending",
+            "/api/v5/trade/fills",
+            "/api/v5/trade/",
+            "/api/v5/tradingBot/grid/sub-orders/trade/order",
+        ):
+            for private in (False, True):
+                with self.assertRaises(okx.ReadOnlyViolation, msg=path):
+                    okx.assert_read_only("GET", path, private=private)
+        trade = [p for p in okx.PUBLIC_READ_PATHS | okx.PRIVATE_READ_PATHS if "/trade/" in p]
+        self.assertEqual(trade, [])
+
     def test_forbidden_methods_raise(self):
         creds = okx.ReadOnlyCredentials(FAKE_KEY, FAKE_SECRET, FAKE_PASSPHRASE, simulated=True)
         client = okx.OkxReadOnlyPrivateClient(creds, base_url="http://127.0.0.1:9")

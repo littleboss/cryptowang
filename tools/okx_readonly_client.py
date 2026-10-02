@@ -55,6 +55,8 @@ PATH_GRID_PENDING = "/api/v5/tradingBot/grid/orders-algo-pending"
 PATH_GRID_HISTORY = "/api/v5/tradingBot/grid/orders-algo-history"
 PATH_GRID_DETAILS = "/api/v5/tradingBot/grid/orders-algo-details"
 PATH_GRID_POSITIONS = "/api/v5/tradingBot/grid/positions"
+# Grid sub-orders / fill details (GET, demo only): per-fill fee fields for fee-after PnL checks.
+PATH_GRID_SUB_ORDERS = "/api/v5/tradingBot/grid/sub-orders"
 
 PUBLIC_READ_PATHS = frozenset(
     {
@@ -75,6 +77,7 @@ PRIVATE_READ_PATHS = frozenset(
         PATH_GRID_HISTORY,
         PATH_GRID_DETAILS,
         PATH_GRID_POSITIONS,
+        PATH_GRID_SUB_ORDERS,
     }
 )
 
