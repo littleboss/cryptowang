@@ -243,6 +243,8 @@ uv run python strategies/grid_ab_compare.py --source csv --candles-csv /tmp/toda
 
 **只有 GET。** 不实现、也不会实现：下单、amend / stop 网格、划转、提现。代码层三道闸：`assert_read_only()` 在任何 socket 打开前拒绝非 GET 方法、拒绝不在只读白名单里的路径、拒绝含 `/trade/`、`amend`、`order-algo`、`withdraw`、`transfer`、`/asset/` 等片段的路径；`place_order/amend_algo/transfer/withdraw` 方法存在但只会抛 `ReadOnlyViolation`。
 
+私有只读白名单新增 `GET /api/v5/tradingBot/grid/sub-orders`（网格子订单 / 成交明细）：只读、仅限 OKX 模拟盘（`OKX_SIMULATED=1`），用于核对逐笔成交的手续费字段（fee-after PnL 验证）；`/trade/` 路径与非 GET 方法仍被拒绝，`will_send_http` 默认不变。
+
 **公共行情（无密钥）**
 
 ```bash
