@@ -245,6 +245,8 @@ uv run python strategies/grid_ab_compare.py --source csv --candles-csv /tmp/toda
 
 私有只读白名单新增 `GET /api/v5/tradingBot/grid/sub-orders`（网格子订单 / 成交明细）：只读、仅限 OKX 模拟盘（`OKX_SIMULATED=1`），用于核对逐笔成交的手续费字段（fee-after PnL 验证）；`/trade/` 路径与非 GET 方法仍被拒绝，`will_send_http` 默认不变。
 
+只读 getter `get_grid_sub_orders(algo_id, algo_ord_type="grid", state="filled", after=None, limit=None)`（标准库客户端与 SDK 门面各一份，同一参数校验）：仅 GET、仅模拟盘，对应 OKX 参数 `algoId` / `algoOrdType` / `type`(filled|live) / `after`(ordId 游标) / `limit`(≤100，超限抛 `ValueError`)，用于读取逐笔成交的 `fee` / `feeCcy` / `rebate` 做手续费核对。
+
 **公共行情（无密钥）**
 
 ```bash

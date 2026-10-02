@@ -15,6 +15,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +124,15 @@ class FakeOkxHandler(BaseHTTPRequestHandler):
                     ],
                 },
             )
+        if u.path == okx.PATH_GRID_SUB_ORDERS:
+            return self._send(
+                200,
+                {
+                    "code": "0",
+                    "msg": "",
+                    "data": [{"ordId": "1", "fee": "-0.01", "feeCcy": "USDT"}],
+                },
+            )
         return self._send(404, {"code": "404", "msg": "not found", "data": []})
 
     def do_POST(self):  # noqa: N802
@@ -209,6 +219,56 @@ class GateTest(unittest.TestCase):
                     okx.assert_read_only("GET", path, private=private)
         trade = [p for p in okx.PUBLIC_READ_PATHS | okx.PRIVATE_READ_PATHS if "/trade/" in p]
         self.assertEqual(trade, [])
+
+    def test_grid_sub_orders_getter_builds_get_request(self):
+        creds = okx.ReadOnlyCredentials(FAKE_KEY, FAKE_SECRET, FAKE_PASSPHRASE, simulated=True)
+        client = okx.OkxReadOnlyPrivateClient(creds, base_url="http://stub.invalid")
+        seen: list[tuple[str, dict]] = []
+
+        def stub(url, headers, timeout):  # replaces the only transport; no socket is opened
+            seen.append((url, headers))
+            return {"code": "0", "msg": "", "data": [{"ordId": "9", "fee": "-0.01"}]}
+
+        with mock.patch.object(okx, "_http_get", stub):
+            rows = client.get_grid_sub_orders("A1")
+            client.get_grid_sub_orders("A1", "contract_grid", "live", after="77", limit=100)
+        self.assertEqual(rows, [{"ordId": "9", "fee": "-0.01"}])
+        base = "http://stub.invalid" + okx.PATH_GRID_SUB_ORDERS
+        self.assertEqual(seen[0][0], base + "?algoId=A1&algoOrdType=grid&type=filled")
+        self.assertEqual(
+            seen[1][0],
+            base + "?algoId=A1&algoOrdType=contract_grid&type=live&after=77&limit=100",
+        )
+        for _, h in seen:
+            self.assertEqual(h["x-simulated-trading"], "1")
+        self.assertEqual(client.requests_made, 2)
+
+    def test_grid_sub_orders_getter_validation_and_limit_cap(self):
+        creds = okx.ReadOnlyCredentials(FAKE_KEY, FAKE_SECRET, FAKE_PASSPHRASE, simulated=True)
+        client = okx.OkxReadOnlyPrivateClient(creds, base_url="http://stub.invalid")
+        with mock.patch.object(okx, "_http_get", return_value={"code": "0", "data": []}) as m:
+            for kw in ({"limit": 101}, {"limit": 0}, {"state": "canceled"}):
+                with self.assertRaises(ValueError, msg=kw):
+                    client.get_grid_sub_orders("A1", **kw)
+            with self.assertRaises(ValueError):
+                client.get_grid_sub_orders("")
+            client.get_grid_sub_orders("A1", limit=100)  # boundary is accepted
+            self.assertEqual(m.call_count, 1)  # every rejection happened before transport
+
+    def test_grid_sub_orders_getter_cannot_reach_trade_or_non_get(self):
+        # the getter only ever targets the allowlisted constant; the gate it uses still refuses
+        # /trade/ and non-GET, and the getter's path is not a /trade/ path.
+        self.assertNotIn("/trade/", okx.PATH_GRID_SUB_ORDERS)
+        with self.assertRaises(okx.ReadOnlyViolation):
+            okx.assert_read_only("POST", okx.PATH_GRID_SUB_ORDERS, private=True)
+        with self.assertRaises(okx.ReadOnlyViolation):
+            okx.assert_read_only("GET", "/api/v5/trade/fills", private=True)
+        creds = okx.ReadOnlyCredentials(FAKE_KEY, FAKE_SECRET, FAKE_PASSPHRASE, simulated=True)
+        client = okx.OkxReadOnlyPrivateClient(creds, base_url="http://stub.invalid")
+        with mock.patch.object(okx, "_http_get") as m:
+            with self.assertRaises(okx.ReadOnlyViolation):
+                client._get("/api/v5/trade/fills", {"algoId": "A1"})
+            m.assert_not_called()
 
     def test_forbidden_methods_raise(self):
         creds = okx.ReadOnlyCredentials(FAKE_KEY, FAKE_SECRET, FAKE_PASSPHRASE, simulated=True)

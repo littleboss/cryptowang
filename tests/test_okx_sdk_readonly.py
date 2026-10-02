@@ -344,6 +344,23 @@ class PrivateReadOnlyClientTest(FakeServerMixin, unittest.TestCase):
         self.assertEqual(FakeOkxHandler.requests[0]["headers"]["x-simulated-trading"], "1")
         c.close()
 
+    def test_grid_sub_orders_passthrough_is_get_with_okx_param_names(self):
+        c = self._client()
+        rows = c.get_grid_sub_orders("A1", state="live", after="77", limit=50)
+        self.assertEqual(rows[0]["feeCcy"], "USDT")
+        req = FakeOkxHandler.requests[0]
+        self.assertEqual(req["method"], "GET")
+        self.assertEqual(req["path"], okx.PATH_GRID_SUB_ORDERS)
+        self.assertEqual(
+            req["query"],
+            {"algoId": "A1", "algoOrdType": "grid", "type": "live", "after": "77", "limit": "50"},
+        )
+        self.assertEqual(req["headers"]["x-simulated-trading"], "1")
+        with self.assertRaises(ValueError):
+            c.get_grid_sub_orders("A1", limit=101)
+        self.assertEqual(len(FakeOkxHandler.requests), 1)
+        c.close()
+
     def test_no_post_ever_reaches_server(self):
         c = self._client()
         c.get_balance()

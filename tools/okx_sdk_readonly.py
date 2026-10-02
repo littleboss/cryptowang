@@ -61,6 +61,7 @@ from okx_readonly_client import (  # noqa: E402
     PATH_GRID_HISTORY,
     PATH_GRID_PENDING,
     PATH_GRID_POSITIONS,
+    PATH_GRID_SUB_ORDERS,
     PATH_HISTORY_CANDLES,
     PATH_TICKER,
     CandleRow,
@@ -69,6 +70,7 @@ from okx_readonly_client import (  # noqa: E402
     ReadOnlyViolation,
     assert_read_only,
     bot_status_summary,
+    grid_sub_orders_query,
     redact,
 )
 from okx_readonly_client import POLICY as _BASE_POLICY  # noqa: E402
@@ -418,6 +420,25 @@ class OkxSdkReadOnlyPrivateClient:
             self._grid.grid_positions,
             algoOrdType=algo_ord_type,
             algoId=algo_id,
+        )
+
+    def get_grid_sub_orders(
+        self,
+        algo_id: str,
+        algo_ord_type: str = "grid",
+        state: str = "filled",
+        after: str | None = None,
+        limit: int | None = None,
+    ) -> list:
+        q = grid_sub_orders_query(algo_id, algo_ord_type, state, after, limit)
+        return self._call(
+            PATH_GRID_SUB_ORDERS,
+            self._grid.grid_sub_orders,
+            algoId=q["algoId"],
+            algoOrdType=q["algoOrdType"],
+            type=q["type"],
+            after=q.get("after", ""),
+            limit=q.get("limit", ""),
         )
 
     # ---- explicitly not implemented (loud failures, not silent no-ops)
