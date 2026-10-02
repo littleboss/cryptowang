@@ -143,6 +143,36 @@ def assert_read_only(method: str, path: str, *, private: bool) -> None:
         raise ReadOnlyViolation(f"refused: path {path!r} not in {kind} allow-list")
 
 
+GRID_SUB_ORDER_STATES = frozenset({"filled", "live"})
+GRID_SUB_ORDERS_MAX_LIMIT = 100
+
+
+def grid_sub_orders_query(
+    algo_id: str,
+    algo_ord_type: str = "grid",
+    state: str = "filled",
+    after: str | None = None,
+    limit: int | None = None,
+) -> dict[str, str]:
+    """Build + validate the query for GET /tradingBot/grid/sub-orders. No I/O.
+
+    OKX params: algoId, algoOrdType, type (live|filled), after (ordId cursor), limit (<= 100).
+    The caller's `state` maps to OKX's `type`.
+    """
+    if not algo_id:
+        raise ValueError("algo_id is required")
+    if state not in GRID_SUB_ORDER_STATES:
+        raise ValueError(f"state must be one of {sorted(GRID_SUB_ORDER_STATES)}, got {state!r}")
+    if limit is not None and not (1 <= limit <= GRID_SUB_ORDERS_MAX_LIMIT):
+        raise ValueError(f"limit must be 1..{GRID_SUB_ORDERS_MAX_LIMIT} for {PATH_GRID_SUB_ORDERS}")
+    q = {"algoId": algo_id, "algoOrdType": algo_ord_type, "type": state}
+    if after:
+        q["after"] = str(after)
+    if limit is not None:
+        q["limit"] = str(limit)
+    return q
+
+
 def redact(value: str | None) -> str:
     if not value:
         return "<unset>"
@@ -532,6 +562,21 @@ class OkxReadOnlyPrivateClient:
 
     def get_grid_positions(self, algo_id: str, algo_ord_type: str = "grid") -> list:
         return self._get(PATH_GRID_POSITIONS, {"algoOrdType": algo_ord_type, "algoId": algo_id})
+
+    def get_grid_sub_orders(
+        self,
+        algo_id: str,
+        algo_ord_type: str = "grid",
+        state: str = "filled",
+        after: str | None = None,
+        limit: int | None = None,
+    ) -> list:
+        """Sub-orders / fill details of one grid bot (per-fill `fee` / `feeCcy` / `rebate`).
+
+        GET only, demo only. `after` is the ordId cursor: pass the last row's `ordId` to page on.
+        """
+        q = grid_sub_orders_query(algo_id, algo_ord_type, state, after, limit)
+        return self._get(PATH_GRID_SUB_ORDERS, q)
 
     # ---- explicitly not implemented (kept as loud failures, not silent no-ops)
 
